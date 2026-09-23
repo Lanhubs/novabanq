@@ -18,8 +18,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.core.constants import (
+    COUNTRY_TAG_SUFFIX,
     PIN_LOCKOUT_MINUTES,
     PIN_MAX_ATTEMPTS,
+    TAG_SUFFIX_SEPARATOR,
     Country,
     Currency,
     ErrorCode,
@@ -82,8 +84,14 @@ class EmailNotVerifiedError(NovaBanqError):
 
 class IdentityAlreadyVerifiedError(NovaBanqError):
     status_code = 409
-    code = ErrorCode.VALIDATION_ERROR
+    code = ErrorCode.IDENTITY_ALREADY_VERIFIED
     message = "Identity is already verified. Names cannot be changed."
+
+
+class UnsupportedCountryError(NovaBanqError):
+    status_code = 422
+    code = ErrorCode.VALIDATION_ERROR
+    message = "This country is not currently supported."
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +115,7 @@ def _default_currency(country: Country) -> Currency:
     """Return the default settlement currency for a country."""
     currency = _DEFAULT_CURRENCY_BY_COUNTRY.get(country)
     if currency is None:
-        raise ValueError(f"No default currency configured for country '{country}'.")
+        raise UnsupportedCountryError()
     return currency
 
 
@@ -140,6 +148,25 @@ def _has_verified_email_otp(uid: str) -> bool:
     exactly one place.
     """
     return otp_service.has_verified_marker(uid, OtpPurpose.EMAIL_VERIFICATION)
+
+
+def _build_full_tag(base_tag: str, country: str) -> str:
+    """Append the country suffix to a base tag.
+
+    Args:
+        base_tag: The tag name without any suffix (e.g. "david323").
+        country: Two-letter ISO country code from the user's profile.
+
+    Returns:
+        The full tag with suffix (e.g. "david323.ng").
+
+    Raises:
+        UnsupportedCountryError: If the country has no configured suffix.
+    """
+    suffix = COUNTRY_TAG_SUFFIX.get(country)
+    if suffix is None:
+        raise UnsupportedCountryError()
+    return f"{base_tag}{TAG_SUFFIX_SEPARATOR}{suffix}"
 
 
 # ---------------------------------------------------------------------------
@@ -253,18 +280,57 @@ def update_names(
     return profile
 
 
-def claim_tag(uid: str, tag: str) -> dict[str, Any]:
-    """Assign a @tag to the user after verifying uniqueness."""
-    profile = get_profile(uid)
+# ---------------------------------------------------------------------------
+# Tag
+# ---------------------------------------------------------------------------
 
-    if profile.get("tag") == tag:
+def check_tag_available(uid: str, base_tag: str) -> dict[str, Any]:
+    """Check whether a base tag is available for the current user.
+
+    The suffix is derived from the user's profile country, so the check
+    is scoped correctly (e.g. "david323.ng" for a Nigerian user). This
+    is a read-only operation; the tag is not reserved. A subsequent
+    claim may still fail if another user wins the race.
+
+    Args:
+        uid: Firebase uid of the caller.
+        base_tag: The tag name without any suffix (already normalized
+            by the request validator).
+
+    Returns:
+        A dict with the full tag and an availability boolean.
+
+    Raises:
+        UserNotFoundError: If the caller has no profile.
+    """
+    profile = get_profile(uid)
+    full_tag = _build_full_tag(base_tag, profile["country"])
+
+    available = tags_service.is_available(full_tag)
+    return {"tag": full_tag, "available": available}
+
+
+def claim_tag(uid: str, base_tag: str) -> dict[str, Any]:
+    """Assign a @tag to the user after verifying uniqueness.
+
+    The country suffix is appended from the user's profile — never from
+    user input — so a Nigerian user cannot claim a ".gh" tag.
+
+    Raises:
+        UserNotFoundError: If the caller has no profile.
+        TagTakenError: If the full tag is already claimed by another user.
+    """
+    profile = get_profile(uid)
+    full_tag = _build_full_tag(base_tag, profile["country"])
+
+    if profile.get("tag") == full_tag:
         return profile
 
-    tags_service.reserve(tag, uid)
-    repository.update_tag(uid, tag)
+    tags_service.reserve(full_tag, uid)
+    repository.update_tag(uid, full_tag)
 
-    profile["tag"] = tag
-    logger.info("Tag '@%s' claimed by uid=%s.", tag, uid)
+    profile["tag"] = full_tag
+    logger.info("Tag '@%s' claimed by uid=%s.", full_tag, uid)
     return profile
 
 

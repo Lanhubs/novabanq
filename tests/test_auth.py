@@ -28,7 +28,12 @@ import httpx
 import pytest
 from dotenv import load_dotenv
 
-from app.core.constants import FirestoreCollection, OtpPurpose
+from app.core.constants import (
+    COUNTRY_TAG_SUFFIX,
+    FirestoreCollection,
+    OtpPurpose,
+    TAG_SUFFIX_SEPARATOR,
+)
 from app.infra.firestore import document
 
 # Load .env so os.environ sees FIREBASE_WEB_API_KEY during the test run.
@@ -56,6 +61,10 @@ TEST_MIDDLE_NAME = "Chukwuemeka"
 TEST_LAST_NAME = "Okafor"
 TEST_COUNTRY = "NG"
 TEST_PHONE = "+2348012345678"
+
+# Suffix the backend will append to any base tag for TEST_COUNTRY.
+TEST_TAG_SUFFIX = COUNTRY_TAG_SUFFIX[TEST_COUNTRY]
+TEST_TAG_SEPARATOR = TAG_SUFFIX_SEPARATOR
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +185,11 @@ def _profile_payload() -> dict:
     }
 
 
+def _full_tag(base_tag: str) -> str:
+    """Return the full tag the backend will produce for TEST_COUNTRY."""
+    return f"{base_tag}{TEST_TAG_SEPARATOR}{TEST_TAG_SUFFIX}"
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -287,6 +301,7 @@ def test_full_onboarding_after_verification(
     auth_headers: dict,
 ) -> None:
     """After OTP verification, profile creation, tag, and PIN must succeed."""
+    # --- Profile creation ---
     response = client.post(
         "/users/me",
         headers=auth_headers,
@@ -296,21 +311,61 @@ def test_full_onboarding_after_verification(
     profile = response.json()["data"]
     assert profile["email_verified"] is True
     assert profile["account_number"]
+    assert len(profile["account_number"]) == 10
+    assert profile["account_number"].isdigit()
     assert profile["pin_set"] is False
     assert profile["first_name"] == TEST_FIRST_NAME
     assert profile["middle_name"] == TEST_MIDDLE_NAME
     assert profile["last_name"] == TEST_LAST_NAME
     assert profile["identity_verified"] is False
+    assert profile["tag"] is None
 
-    tag = f"authtest{int(time.time())}"
+    # --- Tag availability check before claim ---
+    base_tag = f"authtest{int(time.time())}"
+    full_tag = _full_tag(base_tag)
+
+    response = client.get(
+        "/users/me/tag/check",
+        headers=auth_headers,
+        params={"tag": base_tag},
+    )
+    assert response.status_code == 200, response.text
+    check_body = response.json()["data"]
+    assert check_body["tag"] == full_tag
+    assert check_body["available"] is True
+
+    # --- Tag claim appends suffix ---
     response = client.post(
         "/users/me/tag",
         headers=auth_headers,
-        json={"tag": tag},
+        json={"tag": base_tag},
     )
     assert response.status_code == 200, response.text
-    assert response.json()["data"]["tag"] == tag
+    assert response.json()["data"]["tag"] == full_tag
 
+    # --- Availability check now reports taken ---
+    response = client.get(
+        "/users/me/tag/check",
+        headers=auth_headers,
+        params={"tag": base_tag},
+    )
+    assert response.status_code == 200, response.text
+    check_body = response.json()["data"]
+    assert check_body["tag"] == full_tag
+    assert check_body["available"] is False
+
+    # --- Client-supplied suffix is stripped on claim ---
+    base_tag_2 = f"authtest2{int(time.time())}"
+    response = client.post(
+        "/users/me/tag",
+        headers=auth_headers,
+        json={"tag": f"{base_tag_2}.gh"},
+    )
+    assert response.status_code == 200, response.text
+    # Backend ignores the client-supplied ".gh" and appends the profile suffix.
+    assert response.json()["data"]["tag"] == _full_tag(base_tag_2)
+
+    # --- PIN set ---
     response = client.post(
         "/users/me/pin",
         headers=auth_headers,
@@ -319,6 +374,7 @@ def test_full_onboarding_after_verification(
     assert response.status_code == 201, response.text
     assert response.json()["data"]["pin_set"] is True
 
+    # --- PIN verify (correct) ---
     response = client.post(
         "/users/me/pin/verify",
         headers=auth_headers,
@@ -327,6 +383,7 @@ def test_full_onboarding_after_verification(
     assert response.status_code == 200, response.text
     assert response.json()["data"]["verified"] is True
 
+    # --- PIN verify (wrong, 4 attempts) ---
     for _ in range(4):
         response = client.post(
             "/users/me/pin/verify",
@@ -336,6 +393,7 @@ def test_full_onboarding_after_verification(
         assert response.status_code == 422, response.text
         assert response.json()["error"]["code"] == "PIN_INVALID"
 
+    # --- Fifth wrong attempt triggers lockout ---
     response = client.post(
         "/users/me/pin/verify",
         headers=auth_headers,
@@ -344,6 +402,7 @@ def test_full_onboarding_after_verification(
     assert response.status_code == 429, response.text
     assert response.json()["error"]["code"] == "PIN_LOCKED"
 
+    # --- Correct PIN also rejected while locked ---
     response = client.post(
         "/users/me/pin/verify",
         headers=auth_headers,

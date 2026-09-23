@@ -10,9 +10,9 @@ Response envelope (all routes):
 """
 
 import logging
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Query, status
 
 from app.core.security import CurrentClaims, CurrentUid
 from app.features.users import service
@@ -21,7 +21,9 @@ from app.features.users.schemas import (
     PinResetResponse,
     PinVerifyResponse,
     SetPinRequest,
+    TagCheckResponse,
     TagClaimRequest,
+    UpdateNamesRequest,
     UserCreateRequest,
     UserResponse,
     VerifyPhoneRequest,
@@ -129,7 +131,7 @@ async def get_profile(uid: CurrentUid) -> dict[str, Any]:
 )
 async def update_names(
     uid: CurrentUid,
-    payload: UserCreateRequest,
+    payload: UpdateNamesRequest,
 ) -> dict[str, Any]:
     profile = service.update_names(
         uid,
@@ -140,14 +142,49 @@ async def update_names(
     return _ok(_to_response(profile))
 
 
+# ---------------------------------------------------------------------------
+# Tag
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/me/tag/check",
+    response_model=dict,
+    summary="Check whether a tag is available for the current user",
+    description=(
+        "Appends the caller's country suffix (e.g. '.ng') to the supplied "
+        "base name and reports whether the resulting full tag is already "
+        "claimed. Read-only — does not reserve the tag. The frontend "
+        "should debounce calls while the user types."
+    ),
+)
+async def check_tag(
+    uid: CurrentUid,
+    tag: Annotated[str, Query(
+        min_length=3,
+        max_length=25,
+        description="Base tag name without the country suffix.",
+        examples=["david323"],
+    )],
+) -> dict[str, Any]:
+    # Normalize the same way the claim endpoint does so both stay in sync.
+    normalized = tag.lower().lstrip("@")
+    if "." in normalized:
+        normalized = normalized.split(".", 1)[0]
+
+    result = service.check_tag_available(uid, normalized)
+    return _ok(TagCheckResponse(**result).model_dump())
+
+
 @router.post(
     "/me/tag",
     response_model=dict,
     summary="Claim a @tag for the authenticated user",
     description=(
-        "Assigns a globally unique @tag to the current user. The tag is "
-        "normalized to lowercase and must not already be claimed. "
-        "Returns the updated profile."
+        "Assigns a globally unique @tag to the current user. The country "
+        "suffix is appended server-side from the profile — the client "
+        "sends only the base name. The full tag is normalized to "
+        "lowercase and must not already be claimed. Returns the updated "
+        "profile."
     ),
 )
 async def claim_tag(
