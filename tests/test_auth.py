@@ -46,7 +46,7 @@ FIREBASE_SIGNIN_URL = (
     "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword"
 )
 
-DEFAULT_TEST_EMAIL = "getreplus@gmail.com"
+DEFAULT_TEST_EMAIL = "code2withkakes@gmail.com"
 TEST_PASSWORD = "test1234"
 TEST_PIN = "48392"
 WRONG_PIN = "11111"
