@@ -1,69 +1,90 @@
-```markdown
 # NovaBanq Backend API
 
-Pan-African payments platform — backend API for the NovaBanq mobile application.
+Backend API for the NovaBanq mobile app, a pan-African payments platform.
 
-* **Live API:** [https://novabanq-api.onrender.com](https://novabanq-api.onrender.com)
-* **Interactive Docs (Swagger):** [https://novabanq-api.onrender.com/docs](https://novabanq-api.onrender.com/docs)
-* **Health Check:** [https://novabanq-api.onrender.com/health](https://novabanq-api.onrender.com/health)
+| Resource | Link |
+| --- | --- |
+| Live API | https://novabanq-api.onrender.com |
+| Interactive docs (Swagger) | https://novabanq-api.onrender.com/docs |
+| Health check | https://novabanq-api.onrender.com/health |
 
 ---
 
-## Frontend Integration Guide
+## Table of Contents
 
-This section contains everything required to integrate the NovaBanq mobile app (Flutter) with the backend services.
+1. [Quick Start for Frontend](#1-quick-start-for-frontend)
+2. [Authentication](#2-authentication)
+3. [Response Envelope](#3-response-envelope)
+4. [HTTP Status Codes](#4-http-status-codes)
+5. [Error Codes](#5-error-codes)
+6. [Onboarding Flow](#6-onboarding-flow)
+7. [Endpoint Reference](#7-endpoint-reference)
+8. [Phone Verification (Firebase Phone Auth)](#8-phone-verification-firebase-phone-auth)
+9. [Testing and Integration](#9-testing-and-integration)
+10. [What Is Real vs Mocked](#10-what-is-real-vs-mocked)
+11. [Project Structure](#11-project-structure)
+12. [Local Backend Setup](#12-local-backend-setup)
+13. [Running Tests](#13-running-tests)
+14. [Support](#14-support)
 
-### 1. Base URL
+---
+
+## 1. Quick Start for Frontend
+
+**Base URL**
 
 ```text
-[https://novabanq-api.onrender.com/api/v1](https://novabanq-api.onrender.com/api/v1)
-
+https://novabanq-api.onrender.com/api/v1
 ```
 
-All relative paths listed below should be appended to this base URL.
+All endpoint paths in this document are relative to the base URL. For example, `POST /users/me` means `POST https://novabanq-api.onrender.com/api/v1/users/me`.
+
+**Minimum you need to integrate**
+
+1. Sign users up and in with the Firebase client SDK.
+2. Send the Firebase ID token in the `Authorization` header on every request.
+3. Parse every response with one shared handler (see [Response Envelope](#3-response-envelope)).
+4. Branch on `error.code`, never on `error.message` (see [Error Codes](#5-error-codes)).
 
 ---
 
-### 2. Authentication
+## 2. Authentication
 
-Every protected endpoint requires a valid **Firebase ID Token** in the request header:
+Every protected endpoint requires a valid **Firebase ID token**:
 
 ```http
 Authorization: Bearer <firebase_id_token>
 Content-Type: application/json
-
 ```
 
-#### Token Retrieval (Flutter)
+**Getting the token in Flutter**
 
 ```dart
 final user = FirebaseAuth.instance.currentUser;
 final token = await user?.getIdToken();
-
 ```
 
-> **Note:** Firebase ID tokens expire after **1 hour**. Always call `getIdToken()` fresh prior to issuing an API request rather than caching the token string. The Firebase SDK handles token refreshes automatically.
+> **Note:** Firebase ID tokens expire after **1 hour**. Call `getIdToken()` immediately before each API request instead of caching the string. The Firebase SDK refreshes tokens automatically.
 
-The backend verifies the token against Firebase on every request. Missing, expired, or invalid tokens yield a `401 Unauthorized` error accompanied by an explicit error code (`AUTH_REQUIRED` or `AUTH_INVALID`).
+The backend verifies the token with Firebase on every request. A missing, expired, or invalid token returns `401` with error code `AUTH_REQUIRED` or `AUTH_INVALID`.
 
 ---
 
-### 3. Response Envelope Structure
+## 3. Response Envelope
 
-All API responses follow a standard envelope model regardless of status:
+Every response, success or failure, uses the same shape.
 
-#### Success Response
+**Success**
 
 ```json
 {
   "success": true,
-  "data": { ... },
+  "data": { },
   "error": null
 }
-
 ```
 
-#### Error Response
+**Error**
 
 ```json
 {
@@ -75,76 +96,109 @@ All API responses follow a standard envelope model regardless of status:
     "details": {}
   }
 }
-
 ```
 
-> **Implementation Recommendation:** Implement a single global network response handler in your Flutter application that checks `success` and parses either `data` or `error` uniformly.
+> **Recommendation:** Build a single global response handler in the Flutter app that checks `success`, then returns either `data` or a typed `error`.
 
 ---
 
-### 4. HTTP Status Codes
+## 4. HTTP Status Codes
 
-| Status | Code Meaning | Context |
+| Status | Meaning | Typical context |
 | --- | --- | --- |
-| `200` | OK | Success |
-| `201` | Created | Resource successfully created (Profile, PIN, etc.) |
-| `400` | Bad Request | Malformed JSON payload or invalid request body |
-| `401` | Unauthorized | Missing, invalid, or expired authorization token |
-| `403` | Forbidden | Authenticated, but lacking permission (e.g., email not verified) |
-| `404` | Not Found | Resource does not exist (e.g., user profile not found) |
-| `409` | Conflict | Resource conflict (e.g., tag already taken, PIN already set) |
+| `200` | OK | Successful request |
+| `201` | Created | Profile or PIN created |
+| `400` | Bad Request | Malformed JSON or invalid request body |
+| `401` | Unauthorized | Missing, invalid, or expired token |
+| `403` | Forbidden | Authenticated but not permitted (e.g. email not verified) |
+| `404` | Not Found | Resource does not exist (e.g. no user profile) |
+| `409` | Conflict | Already exists (e.g. tag taken, PIN already set) |
 | `422` | Unprocessable Entity | Validation failure or business rule violation |
-| `429` | Too Many Requests | Rate limited (e.g., PIN locked out, OTP cooldown active) |
-| `500` | Internal Error | Server-side execution exception |
+| `429` | Too Many Requests | Rate limited (e.g. PIN locked, OTP cooldown active) |
+| `500` | Internal Error | Server-side exception |
 
 ---
 
-### 5. Error Code Matrix
+## 5. Error Codes
 
-Programmatically switch application logic on `error.code`. Avoid relying on `error.message` for business logic decisions.
+Switch app logic on `error.code`. Do not rely on `error.message` for business decisions.
 
-| Error Code | Description | Recommended Client Action |
+| Error code | Meaning | Recommended client action |
 | --- | --- | --- |
-| `AUTH_REQUIRED` | Authorization header omitted | Redirect to authentication/login flow |
+| `AUTH_REQUIRED` | Authorization header missing | Redirect to login |
 | `AUTH_INVALID` | Token invalid or expired | Refresh token via Firebase SDK, then retry |
-| `USER_NOT_FOUND` | No database profile linked to Firebase UID | Route user to profile registration flow |
-| `USER_ALREADY_EXISTS` | Profile entry already exists | Route user directly to home/dashboard |
-| `EMAIL_NOT_VERIFIED` | Email OTP step incomplete | Direct user to email verification screen |
-| `VALIDATION_ERROR` | Request payload validation failed | Highlight affected fields in UI |
-| `TAG_TAKEN` | Requested `@tag` is unavailable | Prompt user to select an alternative `@tag` |
-| `TAG_INVALID` | Tag formatting rules failed | Display formatting requirements |
-| `OTP_INVALID` | Incorrect or stale OTP input | Prompt for correct verification code |
-| `OTP_EXPIRED` | Verification code expired | Present option to request new OTP |
-| `OTP_TOO_MANY_ATTEMPTS` | Maximum code validation attempts reached | Force new code request |
-| `OTP_RESEND_TOO_SOON` | Requesting code within cooldown window | Disable action button, show countdown timer |
-| `PIN_ALREADY_SET` | Account PIN already exists | Route to PIN verification or reset workflow |
-| `PIN_INVALID` | Provided PIN is incorrect or unset | Prompt for correct PIN |
-| `PIN_LOCKED` | Account locked from excessive failed attempts | Block PIN input, render lockout countdown |
-| `EMAIL_DELIVERY_FAILED` | Outbound email transmission failed | Provide inline retry control |
-| `INTERNAL_ERROR` | Unhandled backend exception | Show system exception notice and log error |
+| `USER_NOT_FOUND` | No profile linked to this Firebase UID | Send user to profile creation |
+| `USER_ALREADY_EXISTS` | Profile already exists | Send user to home/dashboard |
+| `EMAIL_NOT_VERIFIED` | Email OTP step not completed | Send user to email verification screen |
+| `VALIDATION_ERROR` | Request payload failed validation | Highlight the affected fields |
+| `TAG_TAKEN` | Requested `@tag` is unavailable | Ask user to choose another tag |
+| `TAG_INVALID` | Tag format rules failed | Show the tag format requirements |
+| `OTP_INVALID` | Wrong or stale OTP | Ask user to re-enter the code |
+| `OTP_EXPIRED` | OTP has expired | Offer to send a new code |
+| `OTP_TOO_MANY_ATTEMPTS` | Maximum verification attempts reached | Force a new code request |
+| `OTP_RESEND_TOO_SOON` | Resend requested inside cooldown window | Disable the button and show a countdown |
+| `PIN_ALREADY_SET` | Transaction PIN already exists | Route to PIN verify or reset |
+| `PIN_INVALID` | PIN is incorrect (`422`) or not set (`409`) | On `422`, ask user to re-enter the PIN; on `409`, send user to the set-PIN screen |
+| `PIN_LOCKED` | Too many failed PIN attempts | Block PIN input and show a lockout countdown |
+| `EMAIL_DELIVERY_FAILED` | Outbound email failed to send | Show an inline retry control |
+| `INTERNAL_ERROR` | Unhandled backend exception | Show a generic error notice and log it |
 
 ---
 
-### 6. Endpoint Reference
+## 6. Onboarding Flow
 
-#### Onboarding Workflow
+Follow this order. Steps 5 to 7 (tag, PIN) are the same for both sign-up methods; only the email OTP steps differ.
 
-**Step 1: Sign Up (Firebase Auth Client-Side)**
+```text
+Email + password registration
+-----------------------------
+1. Firebase client: createUserWithEmailAndPassword(email, password)
+2. POST /otp/email/send        -> 200 OK
+3. User enters the code from their email
+4. POST /otp/email/verify      -> 200 OK
+5. POST /users/me              -> 201 Created (creates profile + account_number)
+6. POST /users/me/tag          -> 200 OK      (claims the @tag)
+7. POST /users/me/pin          -> 201 Created (sets the 5-digit PIN)
+8. Navigate to the home screen
 
-* Execute via client SDK: `createUserWithEmailAndPassword(email, password)`. Backend interaction is not required for this step.
 
-**Step 2: Dispatch Email Verification OTP**
+Google sign-in registration
+---------------------------
+1. Firebase client: signInWithCredential(...)
+2. POST /users/me              -> 201 Created (email OTP is skipped)
+3. POST /users/me/tag          -> 200 OK
+4. POST /users/me/pin          -> 201 Created
+5. Navigate to the home screen
+```
+
+> **UI guidance (Google sign-in):** At the profile step, always ask the user to enter or confirm their First, Middle, and Last name manually. Legal names must match their identity documents for KYC.
+
+> **Phone verification is not part of onboarding.** It happens later, from the dashboard. See [Section 8](#8-phone-verification-firebase-phone-auth).
+
+---
+
+## 7. Endpoint Reference
+
+All requests below require `Authorization: Bearer <token>`.
+
+### 7.1 Onboarding endpoints
+
+#### Step 1: Sign up (client-side only)
+
+Call `createUserWithEmailAndPassword(email, password)` with the Firebase SDK. No backend call is needed.
+
+#### Step 2: Send email verification OTP
 
 ```http
 POST /otp/email/send
-Authorization: Bearer <token>
-Content-Type: application/json
-
-{}
-
 ```
 
-* **Sample Response:**
+Request body: `{}`
+
+The recipient address comes from the Firebase session. **Do not send an email in the payload.**
+
+Response:
+
 ```json
 {
   "success": true,
@@ -155,44 +209,39 @@ Content-Type: application/json
   },
   "error": null
 }
-
 ```
 
+Use `resend_available_in_seconds` to drive the resend button countdown.
 
-* *Note: The recipient address is derived directly from the Firebase session. Do not send email in payload.*
-
-**Step 3: Confirm Email OTP**
+#### Step 3: Verify email OTP
 
 ```http
 POST /otp/email/verify
-Authorization: Bearer <token>
-Content-Type: application/json
+```
 
+```json
 {
   "code": "123456"
 }
-
 ```
 
-* **Sample Response:**
+Response:
+
 ```json
 {
   "success": true,
   "data": { "verified": true },
   "error": null
 }
-
 ```
 
-
-
-**Step 4: Create Initial Profile**
+#### Step 4: Create profile
 
 ```http
 POST /users/me
-Authorization: Bearer <token>
-Content-Type: application/json
+```
 
+```json
 {
   "first_name": "David",
   "middle_name": "Chukwuemeka",
@@ -200,10 +249,10 @@ Content-Type: application/json
   "country": "NG",
   "phone": "+2348012345678"
 }
-
 ```
 
-* **Sample Response (`201 Created`):**
+Response (`201 Created`):
+
 ```json
 {
   "success": true,
@@ -227,262 +276,378 @@ Content-Type: application/json
   },
   "error": null
 }
-
 ```
 
+> Returns `403 EMAIL_NOT_VERIFIED` if Step 3 was skipped. Google sign-in users are exempt and can call this endpoint directly.
 
-
-> **Important:** Returns `403 EMAIL_NOT_VERIFIED` if Step 3 was bypassed. (Note: Google Federated Auth bypasses OTP naturally and proceeds directly).
-
-**Step 5: Claim `@tag**`
+#### Step 5: Claim `@tag`
 
 ```http
 POST /users/me/tag
-Authorization: Bearer <token>
-Content-Type: application/json
+```
 
+```json
 {
   "tag": "david"
 }
-
 ```
 
-* Format validation requires `^[a-z0-9_]+$`. Automatic lowercase normalization is executed. Response outputs the updated profile object.
+* Allowed characters: `^[a-z0-9_]+$`. Input is lowercased automatically.
+* Returns the updated profile object.
+* Possible errors: `TAG_TAKEN`, `TAG_INVALID`.
 
-**Step 6: Configure Transaction PIN**
+#### Step 6: Set transaction PIN
 
 ```http
 POST /users/me/pin
-Authorization: Bearer <token>
-Content-Type: application/json
+```
 
+```json
 {
   "pin": "48392"
 }
-
 ```
 
-* **Sample Response (`201 Created`):**
+Response (`201 Created`):
+
 ```json
 {
   "success": true,
   "data": { "pin_set": true },
   "error": null
 }
-
 ```
 
+* Must be exactly **5 digits**.
+* Sequential or repeating PINs (e.g. `11111`) are rejected.
+* Returns `PIN_ALREADY_SET` if a PIN already exists.
 
-* Requirements: Exactly **5 digits**. Sequential or repeating series (e.g., `11111`) are rejected.
+### 7.2 PIN and profile endpoints
 
----
-
-#### Verification & User Management Endpoints
-
-**Verify PIN (Pre-Transaction Gate)**
+#### Verify PIN (gate before transactions)
 
 ```http
 POST /users/me/pin/verify
-Authorization: Bearer <token>
-Content-Type: application/json
+```
 
+```json
 {
   "pin": "48392"
 }
-
 ```
 
-* *5 consecutive failure attempts yield `429 PIN_LOCKED` triggering a mandatory 20-minute lockout.*
+Response (`200 OK`):
 
-**Reset Transaction PIN**
+```json
+{
+  "success": true,
+  "data": { "verified": true },
+  "error": null
+}
+```
 
-* Requires prior verification via Firebase Phone Auth. Submit fresh Firebase ID token containing `phone_number` claim:
+Errors:
+
+| Status | Code | Meaning |
+| --- | --- | --- |
+| `422` | `PIN_INVALID` | Wrong PIN |
+| `409` | `PIN_INVALID` | No PIN has been set on the account |
+| `429` | `PIN_LOCKED` | Too many failed attempts, locked for 20 minutes |
+| `404` | `USER_NOT_FOUND` | No profile exists for this user |
+
+> **Note:** `PIN_INVALID` is returned for both "wrong PIN" and "no PIN set", and only the HTTP status tells them apart. Use `422` to show "Incorrect PIN" and `409` to send the user to the set-PIN screen.
+
+After **5 consecutive failed attempts** the API returns `429 PIN_LOCKED` and locks the PIN for **20 minutes**. Block PIN entry in the UI and show a countdown.
+
+#### Reset transaction PIN
 
 ```http
 POST /users/me/pin/reset
-Authorization: Bearer <token>
-
 ```
 
-**Verify Phone Number (Post-Onboarding)**
+Requires a fresh Firebase ID token that contains a `phone_number` claim, which means the user must have just completed Firebase Phone Auth (see [Section 8](#8-phone-verification-firebase-phone-auth)).
+
+This endpoint takes **no request body**. Verification happens entirely through the token.
 
 ```http
-POST /users/me/phone/verify
-Authorization: Bearer <token>
-Content-Type: application/json
-
-{
-  "phone_number": "+2348012345678"
-}
-
+POST /users/me/pin/reset
+Authorization: Bearer <fresh_token_with_phone_claim>
 ```
 
-**Fetch Profile Info**
+Response (`200 OK`):
+
+```json
+{
+  "success": true,
+  "data": {
+    "reset": true,
+    "message": "PIN cleared. You may now set a new PIN."
+  },
+  "error": null
+}
+```
+
+Errors:
+
+| Status | Code | Meaning |
+| --- | --- | --- |
+| `403` | `VALIDATION_ERROR` | Token has no `phone_number` claim, or it does not match the phone stored on the profile |
+| `404` | `USER_NOT_FOUND` | No profile exists for this user |
+| `401` | `AUTH_REQUIRED` / `AUTH_INVALID` | Token missing, invalid, or expired |
+
+**Reset flow:** complete Firebase Phone Auth (link the phone and force-refresh the token, as in Section 8.2), call `POST /users/me/pin/reset`, then call `POST /users/me/pin` with the new PIN in the body (`{"pin": "48392"}`), which returns `201` with `{"pin_set": true}`.
+
+#### Get profile
 
 ```http
 GET /users/me
-Authorization: Bearer <token>
-
 ```
 
-**Update Legal Name** *(Allowed only prior to completing formal identity verification)*
+Returns the profile object shown in Step 4.
+
+#### Update legal name
 
 ```http
 PATCH /users/me/names
-Authorization: Bearer <token>
-Content-Type: application/json
+```
 
+```json
 {
   "first_name": "David",
   "middle_name": "Chukwuemeka",
   "last_name": "Okafor"
 }
-
 ```
+
+Allowed only **before** identity verification is completed.
+
+#### Verify phone number
+
+```http
+POST /users/me/phone/verify
+```
+
+See [Section 8](#8-phone-verification-firebase-phone-auth) for the full flow.
 
 ---
 
-### 7. Client Onboarding State Sequence
+## 8. Phone Verification (Firebase Phone Auth)
 
-```text
-[Standard Email Registration Path]
-1. Firebase client.signUp(email, password)
-2. POST /otp/email/send                      --> 200 OK
-3. User enters input code from email
-4. POST /otp/email/verify                    --> 200 OK
-5. POST /users/me                            --> 201 Created (Generates profile + account_number)
-6. POST /users/me/tag                        --> 200 OK (Claims handle)
-7. POST /users/me/pin                        --> 201 Created (Sets 5-digit PIN)
-8. Navigate to App Home Screen
+Phone verification works differently from email OTP. **The backend does not send SMS or generate codes.** Firebase does both. The backend only verifies the resulting token.
 
-[Google OAuth Registration Path]
-1. Firebase client.signInWithCredential()
-2. POST /users/me                            --> 201 Created (Skips OTP verification)
-3. POST /users/me/tag                        --> 200 OK
-4. POST /users/me/pin                        --> 201 Created
-5. Navigate to App Home Screen
+### 8.1 Flow
 
+1. The Flutter app calls Firebase `verifyPhoneNumber()`. Firebase sends the SMS.
+2. The user enters the SMS code in the app.
+3. Firebase verifies the code. The user's fresh ID token now includes a `phone_number` claim.
+4. The app sends that fresh token to `POST /users/me/phone/verify`.
+5. The backend reads `phone_number` from the token, compares it with the phone stored on the profile, and sets `phone_verified: true`.
+
+### 8.2 Flutter example
+
+```dart
+// 1. Send the SMS
+await FirebaseAuth.instance.verifyPhoneNumber(
+  phoneNumber: userPhone,
+  verificationCompleted: (credential) async {
+    // Android auto-retrieval path
+    await FirebaseAuth.instance.currentUser?.linkWithCredential(credential);
+  },
+  codeSent: (verificationId, resendToken) {
+    // Show the OTP input screen
+  },
+  verificationFailed: (e) {
+    // Handle error (on Android this is usually a missing SHA fingerprint)
+  },
+  codeAutoRetrievalTimeout: (verificationId) {},
+);
+
+// 2. After the user enters the code, link the phone to the signed-in account
+final credential = PhoneAuthProvider.credential(
+  verificationId: verificationId,
+  smsCode: enteredCode,
+);
+await FirebaseAuth.instance.currentUser?.linkWithCredential(credential);
+
+// 3. Force-refresh the token so it includes the phone_number claim
+final token = await FirebaseAuth.instance.currentUser?.getIdToken(true);
+
+// 4. Send it to the backend
+// POST /api/v1/users/me/phone/verify
+// Header: Authorization: Bearer <token>
+// Body:   { "phone_number": "+2348012345678" }
 ```
 
-> **Client UI Guidance (Google Auth):** Always prompt the user to confirm/enter their official First, Middle, and Last name manually during Step 2. Legal names must match identity verification documents (KYC).
+> **Important:** Use `linkWithCredential` on the current user rather than `signInWithCredential`. Signing in with a phone credential while already signed in with email or Google switches the session to a different Firebase account, and the token's UID will no longer match the user's NovaBanq profile.
+
+### 8.3 Backend endpoint
+
+```http
+POST /users/me/phone/verify
+Authorization: Bearer <fresh_token_with_phone_claim>
+Content-Type: application/json
+```
+
+```json
+{
+  "phone_number": "+2348012345678"
+}
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "verified": true,
+    "phone_number": "+2348012345678"
+  },
+  "error": null
+}
+```
+
+If the token's `phone_number` claim does not match the phone stored on the profile, the request returns `403` with code `VALIDATION_ERROR`.
+
+### 8.4 Firebase Console setup (required)
+
+Ask whoever owns the Firebase project to confirm all of the following before you start:
+
+1. **Phone sign-in enabled:** Firebase Console → Authentication → Sign-in method → Phone → Enable.
+2. **Android SHA-1 and SHA-256 fingerprints registered:** Firebase Console → Project Settings → Your apps → Add fingerprint. Missing fingerprints cause `verificationFailed` errors on Android.
+3. **APNs configured (iOS only):** required for silent push on iOS.
+
+### 8.5 Testing without real SMS
+
+Firebase supports **test phone numbers**: fictional numbers with a fixed code. No SMS is sent, and the pre-set code is accepted.
+
+**Setup**
+
+1. Firebase Console → Authentication → Sign-in method → Phone → expand **Phone numbers for testing**.
+2. Add a number (e.g. `+2348012345678`) and a code (e.g. `123456`).
+3. Save.
+
+**At runtime**, the app calls `verifyPhoneNumber()` with the test number. No SMS goes out, `codeSent` fires, and the tester enters the pre-set code. Firebase then issues a token identical to a real one.
+
+> **Do not add a backend bypass endpoint for testing.** Firebase test numbers keep the production auth flow intact and only skip SMS delivery. The backend never needs to know the difference.
+
+### 8.6 Phone verification is a soft gate
+
+Phone verification happens **on the dashboard after signup**, not during onboarding. Users can browse the app before verifying. Transfers will require `phone_verified: true` once that feature ships.
 
 ---
 
-### 8. Integration & Testing Workflows
+## 9. Testing and Integration
 
-#### Interactive Swagger UI
+### 9.1 Swagger UI
 
-Navigate to [https://novabanq-api.onrender.com/docs](https://novabanq-api.onrender.com/docs?utm_source=gemini) to perform manual endpoint verification.
+Open https://novabanq-api.onrender.com/docs to test endpoints manually.
 
-1. Generate a valid user token via the client SDK or direct Firebase Auth API endpoint.
-2. Select **Authorize** (top right) in Swagger UI.
-3. Paste token string into the authorization input dialog and confirm.
+1. Generate a valid user token (via the client SDK, or the terminal command below).
+2. Click **Authorize** (top right).
+3. Paste the token and confirm.
 
-#### Terminal Token Generation Command
+### 9.2 Generate a test token from the terminal
 
 ```bash
-curl -X POST "[https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=YOUR_FIREBASE_WEB_API_KEY](https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=YOUR_FIREBASE_WEB_API_KEY)" \
+curl -X POST "https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=YOUR_FIREBASE_WEB_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"email":"test@novabanq.dev","password":"test1234","returnSecureToken":true}'
-
 ```
 
-Extract `idToken` from response body to pass within authentication headers.
+Copy `idToken` from the response and use it as the Bearer token.
 
 ---
 
-### 9. Environment Capabilities (Hackathon Scope)
+## 10. What Is Real vs Mocked
 
-| Feature Subsystem | Status | Details |
+Current scope is a hackathon build.
+
+| Feature | Status | Details |
 | --- | --- | --- |
-| Firebase Authentication | **Production-Ready** | Fully integrated |
-| Firestore Database | **Production-Ready** | Real-time persistence operational |
-| Outbound Email OTP | **Production-Ready** | Brevo service integration |
-| Phone Auth Verification | **Production-Ready** | Firebase Native SMS Provider |
-| BVN / Identity Check | **Mock Integration** | Mocked (Passes validation on regex format check) |
-| Biometric Face Sync | **Mock Integration** | Mocked (Returns deterministic positive responses) |
-| Virtual Accounts (Flutterwave) | **Sandbox Mode** | Account numbers generated; deposits simulated only |
-| Ledger / Transfer Engine | **Under Construction** | Planned for upcoming build cycle |
-| Wallet Balances | **Under Construction** | Planned for upcoming build cycle |
+| Firebase Authentication | Production-ready | Fully integrated |
+| Firestore database | Production-ready | Real persistence |
+| Email OTP | Production-ready | Sent via Brevo |
+| Phone verification | Production-ready | Firebase native SMS |
+| BVN / identity check | Mock | Passes on regex format check only |
+| Biometric face sync | Mock | Returns deterministic positive responses |
+| Virtual accounts (Flutterwave) | Sandbox | Account numbers generated; deposits simulated |
+| Ledger / transfer engine | Under construction | Planned for a future build |
+| Wallet balances | Under construction | Planned for a future build |
 
 ---
 
-### 10. Project Directory Layout
+## 11. Project Structure
 
 ```text
 app/
-├── main.py                     FastAPI application instance initialization
-├── api/                        Route aggregation and version control mapping
-├── core/                       Environment config, safety handlers, system exceptions
-├── infra/                      Third-party adapters (Firebase, Firestore, Brevo, Flutterwave)
-└── features/                   Domain-driven design feature modules
-    ├── users/                  Profile structures, identity claims, transaction PIN
-    ├── otp/                    Email verification delivery logic
-    ├── tags/                   Unique handle allocation (@tag)
-    ├── account_numbers/        Core bank routing and account creation
-    ├── identity/               Government ID / BVN validation logic (mocked)
-    ├── virtual_accounts/       Payment gateway bridge (Flutterwave Sandbox)
-    ├── accounts/               Balance states (planned)
-    ├── funding/                Inbound deposit processing (planned)
-    ├── currency/               FX calculations (planned)
-    ├── ledger/                 Double-entry bookkeeping (planned)
-    ├── transfers/              Outbound transaction handling (planned)
-    └── transactions/           Account history and statements (planned)
-
+├── main.py                  FastAPI app initialization
+├── api/                     Route aggregation and versioning
+├── core/                    Config, security handlers, exceptions
+├── infra/                   Third-party adapters (Firebase, Firestore, Brevo, Flutterwave)
+└── features/                Domain-driven feature modules
+    ├── users/               Profile, identity claims, transaction PIN
+    ├── otp/                 Email verification delivery
+    ├── tags/                Unique @tag handles
+    ├── account_numbers/     Account number generation
+    ├── identity/            Government ID / BVN validation (mocked)
+    ├── virtual_accounts/    Payment gateway bridge (Flutterwave sandbox)
+    ├── accounts/            Balances (planned)
+    ├── funding/             Inbound deposits (planned)
+    ├── currency/            FX calculations (planned)
+    ├── ledger/              Double-entry bookkeeping (planned)
+    ├── transfers/           Outbound transactions (planned)
+    └── transactions/        History and statements (planned)
 ```
 
-Each feature module is structured cleanly into four discrete layers:
+Each feature module has four layers:
 
-* `router.py` — Controller definitions / API routing interface
-* `schemas.py` — Pydantic request / response validation models
-* `service.py` — Domain business logic processing
-* `repository.py` — Database execution layer (Firestore)
+| File | Responsibility |
+| --- | --- |
+| `router.py` | API routes (controllers) |
+| `schemas.py` | Pydantic request/response models |
+| `service.py` | Business logic |
+| `repository.py` | Firestore access |
 
 ---
 
-### 11. Local Backend Setup
+## 12. Local Backend Setup
 
 ```bash
-# Initialize virtual environment
+# Create a virtual environment
 python -m venv .venv
 
-# Activate environment (Windows PowerShell)
+# Activate it (Windows PowerShell)
 .venv\Scripts\Activate.ps1
 
-# Activate environment (macOS/Linux)
+# Activate it (macOS/Linux)
 # source .venv/bin/activate
 
-# Install application dependencies
+# Install dependencies
 pip install -r requirements.txt
 
-# Start development server
+# Start the dev server
 uvicorn app.main:app --reload
-
 ```
 
-#### Required Prerequisites
+**Prerequisites**
 
-* Valid `serviceAccountKey.json` placed directly within the root project directory.
-* Configured `.env` file populated according to parameters defined in `.env.example`.
+* A valid `serviceAccountKey.json` in the project root.
+* A `.env` file configured from `.env.example`.
 
 ---
 
-### 12. Test Execution
+## 13. Running Tests
 
 ```bash
 pytest tests/ -v -s
-
 ```
 
-*Running `tests/test_auth.py` triggers functional integration tests against a live local server instance bound to Firebase and Firestore. Ensure `FIREBASE_WEB_API_KEY` is present in your local `.env` configuration.*
+`tests/test_auth.py` runs integration tests against a live local server connected to Firebase and Firestore. Set `FIREBASE_WEB_API_KEY` in your local `.env` first.
 
 ---
 
-### 13. Technical Support
+## 14. Support
 
-* **API Specs / Contracts:** Contact the primary Backend Engineer.
-* **Authentication Platform:** Consult the project Firebase Console settings panel.
-
-```
-
-```
+* **API specs and contracts:** contact the primary backend engineer.
+* **Authentication platform:** check the project's Firebase Console settings.
