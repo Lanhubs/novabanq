@@ -46,6 +46,19 @@ ACCOUNT_NUMBER_COUNTRY_PREFIX: dict[str, str] = {
 }
 
 
+# Country → lowercase suffix appended to the user's @tag.
+# The suffix is derived from the profile country, never from user input.
+# Example: a user in Nigeria who claims "david" is stored as "david.ng".
+COUNTRY_TAG_SUFFIX: dict[str, str] = {
+    Country.NIGERIA: "ng",
+    Country.GHANA: "gh",
+    Country.KENYA: "ke",
+    Country.SENEGAL: "sn",
+    Country.IVORY_COAST: "ci",
+    Country.SOUTH_AFRICA: "za",
+}
+
+
 class FirestoreCollection(StrEnum):
     USERS = "users"
     TAGS = "tags"
@@ -58,6 +71,7 @@ class FirestoreCollection(StrEnum):
     FUNDING_RECORDS = "funding_records"
     IDEMPOTENCY_KEYS = "idempotency_keys"
     OTP_CODES = "otp_codes"
+    IDENTITY_VERIFICATIONS = "identity_verifications"
 
 
 class OtpPurpose(StrEnum):
@@ -90,6 +104,9 @@ class ErrorCode(StrEnum):
     PIN_ALREADY_SET = "PIN_ALREADY_SET"
     PIN_INVALID = "PIN_INVALID"
     PIN_LOCKED = "PIN_LOCKED"
+    IDENTITY_VERIFICATION_FAILED = "IDENTITY_VERIFICATION_FAILED"
+    IDENTITY_ALREADY_VERIFIED = "IDENTITY_ALREADY_VERIFIED"
+    IDENTITY_PROVIDER_UNAVAILABLE = "IDENTITY_PROVIDER_UNAVAILABLE"
     VALIDATION_ERROR = "VALIDATION_ERROR"
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
@@ -103,6 +120,7 @@ ACCOUNT_NUMBER_MAX_RETRIES = 5
 TAG_MIN_LENGTH = 3
 TAG_MAX_LENGTH = 20
 TAG_ALLOWED_PATTERN = r"^[a-z0-9_]+$"
+TAG_SUFFIX_SEPARATOR = "."
 
 # OTP rules.
 OTP_CODE_LENGTH = 6
@@ -114,6 +132,10 @@ OTP_RESEND_COOLDOWN_SECONDS = 10
 PIN_LENGTH = 5
 PIN_MAX_ATTEMPTS = 5
 PIN_LOCKOUT_MINUTES = 20
+
+# Identity verification rules.
+IDENTITY_BVN_LENGTH = 11
+IDENTITY_FACE_MIN_CONFIDENCE = 0.70
 
 # FX rate validity window (seconds) — rate locks for the frontend.
 RATE_LOCK_SECONDS = 45
@@ -129,3 +151,4 @@ HTTP_409_CONFLICT = 409
 HTTP_422_UNPROCESSABLE_ENTITY = 422
 HTTP_429_TOO_MANY_REQUESTS = 429
 HTTP_500_INTERNAL_SERVER_ERROR = 500
+HTTP_502_BAD_GATEWAY = 502
