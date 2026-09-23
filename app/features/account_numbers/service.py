@@ -3,8 +3,13 @@
 Generates unique NovaBanq account numbers and reserves them for users.
 
 Account number format:
-    NB + 2-digit country prefix + 8 random digits
-    Example: NB0147293810 (Nigeria)
+    2-digit country prefix + 8 random digits = 10 numeric digits
+    Example: 0172938104 (Nigeria)
+
+These numbers are NovaBanq-internal placeholders. They match the NUBAN
+length (10 digits, all numeric) but are not issued by any bank. When
+the virtual accounts module ships, Flutterwave issues a real NUBAN per
+user and that number replaces this placeholder on the profile.
 
 The country prefix is derived from the user's country at the time of
 creation. The 8 trailing digits are random; collisions are handled by
@@ -22,7 +27,6 @@ import secrets
 from app.core.constants import (
     ACCOUNT_NUMBER_COUNTRY_PREFIX,
     ACCOUNT_NUMBER_MAX_RETRIES,
-    ACCOUNT_NUMBER_PREFIX,
     ACCOUNT_NUMBER_RANDOM_DIGITS,
     ErrorCode,
 )
@@ -59,7 +63,7 @@ def _build_candidate(country_code: str) -> str:
     random_part = secrets.randbelow(upper_bound)
     random_str = str(random_part).zfill(ACCOUNT_NUMBER_RANDOM_DIGITS)
 
-    return f"{ACCOUNT_NUMBER_PREFIX}{prefix}{random_str}"
+    return f"{prefix}{random_str}"
 
 
 def generate_and_reserve(uid: str, country_code: str) -> str:

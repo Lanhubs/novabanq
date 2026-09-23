@@ -111,8 +111,10 @@ class ErrorCode(StrEnum):
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
 
-# Account number format: NB + 2-digit country + 8 random digits.
-ACCOUNT_NUMBER_PREFIX = "NB"
+# Account number format: 2-digit country prefix + 8 random digits = 10 numeric digits.
+# Matches NUBAN length. Replaced by the payment provider's NUBAN when real
+# virtual accounts are issued via Flutterwave.
+ACCOUNT_NUMBER_COUNTRY_DIGITS = 2
 ACCOUNT_NUMBER_RANDOM_DIGITS = 8
 ACCOUNT_NUMBER_MAX_RETRIES = 5
 

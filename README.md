@@ -142,6 +142,9 @@ Switch app logic on `error.code`. Do not rely on `error.message` for business de
 | `PIN_LOCKED` | Too many failed PIN attempts | Block PIN input and show a lockout countdown |
 | `EMAIL_DELIVERY_FAILED` | Outbound email failed to send | Show an inline retry control |
 | `PHONE_MISMATCH` | The phone in the token does not match the profile | Show a "phone doesn't match" error |
+| `IDENTITY_VERIFICATION_FAILED` | BVN or face verification rejected | Show retry, or contact support |
+| `IDENTITY_ALREADY_VERIFIED` | Identity is already verified | Route to dashboard |
+| `IDENTITY_PROVIDER_UNAVAILABLE` | KYC provider is down | Show retry later message |
 | `INTERNAL_ERROR` | Unhandled backend exception | Show a generic error notice and log it |
 
 ---
@@ -270,7 +273,7 @@ Response (`201 Created`):
     "email_verified": true,
     "phone_verified": false,
     "identity_verified": false,
-    "account_number": "NB0172094612",
+    "account_number": "0172094612",
     "pin_set": false,
     "avatar_url": null,
     "created_at": "2026-09-23T15:04:44.12Z"
@@ -570,7 +573,8 @@ Current scope is a hackathon build.
 | Phone verification | Production-ready | Firebase native SMS |
 | BVN / identity check | Mock | Passes on regex format check only |
 | Biometric face sync | Mock | Returns deterministic positive responses |
-| Virtual accounts (Flutterwave) | Sandbox | Account numbers generated; deposits simulated |
+| Account numbers | Placeholder | 10-digit NovaBanq-internal numbers. Not real bank accounts. |
+| Virtual accounts (Flutterwave) | Not yet implemented | — |
 | Ledger / transfer engine | Under construction | Planned for a future build |
 | Wallet balances | Under construction | Planned for a future build |
 
