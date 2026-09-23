@@ -143,7 +143,7 @@ Switch app logic on `error.code`. Do not rely on `error.message` for business de
 | `EMAIL_DELIVERY_FAILED` | Outbound email failed to send | Show an inline retry control |
 | `PHONE_MISMATCH` | The phone in the token does not match the profile | Show a "phone doesn't match" error |
 | `IDENTITY_VERIFICATION_FAILED` | BVN or face verification rejected | Show retry, or contact support |
-| `IDENTITY_ALREADY_VERIFIED` | Identity is already verified | Route to dashboard |
+| `IDENTITY_ALREADY_VERIFIED` | Identity already verified, names locked | Route to dashboard |
 | `IDENTITY_PROVIDER_UNAVAILABLE` | KYC provider is down | Show retry later message |
 | `INTERNAL_ERROR` | Unhandled backend exception | Show a generic error notice and log it |
 
@@ -284,6 +284,39 @@ Response (`201 Created`):
 
 > Returns `403 EMAIL_NOT_VERIFIED` if Step 3 was skipped. Google sign-in users are exempt and can call this endpoint directly.
 
+#### Tag format: base name + country suffix
+
+Tags are not stored raw. The user only ever types the **base name** (e.g. `david323`); the backend appends a country suffix derived from the profile's `country` field (e.g. `.ng`, `.gh`) to produce the full tag (`david323.ng`).
+
+* The suffix is **not editable** by the user — it's derived server-side from their profile country, never sent by the client.
+* **Frontend guidance:** show a live preview under the tag input as the user types, e.g. "Your tag will be `@david323.ng`".
+* When a **sender** enters a tag to pay someone, they must enter the **full suffixed tag** (`david323.ng`), not just the base name — the backend does not guess the suffix for lookups initiated by someone else.
+
+#### Check tag availability
+
+```http
+GET /users/me/tag/check?tag=david323
+```
+
+Pass the base name (no suffix) as the `tag` query parameter.
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "tag": "david323.ng",
+    "available": true
+  },
+  "error": null
+}
+```
+
+* **Read-only** — checking availability does **not** reserve the tag. A tag can still be taken by someone else between the check and the actual claim.
+* The returned `tag` is already suffixed (the suffix is appended server-side from the caller's profile `country`), so use it directly for the live preview.
+* **Frontend guidance:** debounce calls to this endpoint (e.g. 300–500ms after the user stops typing) rather than firing one per keystroke.
+
 #### Step 5: Claim `@tag`
 
 ```http
@@ -297,6 +330,7 @@ POST /users/me/tag
 ```
 
 * Allowed characters: `^[a-z0-9_]+$`. Input is lowercased automatically.
+* Send only the base name — the server appends the country suffix; do not include it in the request.
 * Returns the updated profile object.
 * Possible errors: `TAG_TAKEN`, `TAG_INVALID`.
 
@@ -573,7 +607,7 @@ Current scope is a hackathon build.
 | Phone verification | Production-ready | Firebase native SMS |
 | BVN / identity check | Mock | Passes on regex format check only |
 | Biometric face sync | Mock | Returns deterministic positive responses |
-| Account numbers | Placeholder | 10-digit NovaBanq-internal numbers. Not real bank accounts. |
+| Account numbers | Placeholder | 10-digit NovaBanq-internal numbers. Not real bank accounts — will be replaced with real NUBANs once virtual accounts go live via Flutterwave. |
 | Virtual accounts (Flutterwave) | Not yet implemented | — |
 | Ledger / transfer engine | Under construction | Planned for a future build |
 | Wallet balances | Under construction | Planned for a future build |
