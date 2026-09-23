@@ -37,6 +37,8 @@ Do not start a new item while anything is in ⚠️ or 🔧. Finish the open ite
 ### Users feature
 - `POST /users/me` — creates profile, gated on email verification
 - `GET /users/me` — returns profile
+- `PATCH /users/me/names` — updates names, locked after identity verification
+- `GET /users/me/tag/check` — checks tag availability with suffix
 - `POST /users/me/tag` — claims a @tag with atomic uniqueness
 - `POST /users/me/phone/verify` — marks phone as verified
 - `POST /users/me/pin` — sets PIN (bcrypt hashed)
@@ -50,11 +52,17 @@ Do not start a new item while anything is in ⚠️ or 🔧. Finish the open ite
 - Repository + service with atomic reservation via Firestore transaction
 - Uses `secrets.randbelow` (cryptographically secure)
 - Retry loop on collision
+- **10-digit numeric format** (2-digit country prefix + 8 random digits)
+- No prefix letters — placeholder until real NUBANs are issued via Flutterwave
 
 ### Tags
 - Repository + service with atomic reservation
 - Tag uniqueness enforced at DB level
 - Format: lowercase letters, numbers, underscores only
+- **Country suffix appended server-side** — user claims `david323`, backend stores `david323.ng`
+- Suffix derived from the user's profile country, never from the request
+- Client-supplied suffixes are stripped before storage
+- Availability check endpoint at `GET /users/me/tag/check` — read-only, debounced on the frontend
 
 ### Email OTP
 - Repository (Firestore-backed, SHA-256 hashed codes, expiry, attempts)
@@ -76,38 +84,31 @@ Do not start a new item while anything is in ⚠️ or 🔧. Finish the open ite
 
 ## ⚠️ Agreed but Not Implemented
 
-### 1. Remove `NB` prefix from account numbers
-**Decision:** Account numbers must be 10 digits, all numeric. No `NB` prefix.
-**Current state:** Code still generates `NB0147293810`.
-**Files to change:**
-- `app/core/constants.py` — replace `ACCOUNT_NUMBER_PREFIX` with `ACCOUNT_NUMBER_COUNTRY_DIGITS`
-- `app/features/account_numbers/service.py` — remove prefix from `_build_candidate`
-- `README.md` — update example account numbers
-
-### 2. Append country suffix to @tags
-**Decision:** Users claim `david`, backend stores `david.ng` (Nigeria), `david.gh` (Ghana), etc.
-**Current state:** Tags are stored without suffix.
-**Files to change:**
-- `app/core/constants.py` — add `COUNTRY_TAG_SUFFIX` map (already added)
-- `app/features/users/service.py` — append suffix in `claim_tag`
-- `app/features/users/schemas.py` — `TagClaimRequest` validator strips suffix before service
-- `app/features/users/schemas.py` — `UserResponse` tag field description
-- `README.md` — document the format
-- `tests/test_auth.py` — update tag assertions
-
-### 3. Fix README gaps
-**Current state:** README exists but has three known gaps.
+### 1. Fix README gaps
+**Current state:** README exists but is missing several sections that the Flutter dev needs.
 **Files to change:**
 - `README.md` — add missing success response for `POST /users/me/pin/verify`
 - `README.md` — add full spec for `POST /users/me/pin/reset`
 - `README.md` — update `403 VALIDATION_ERROR` → `422 PHONE_MISMATCH` for phone mismatch
+- `README.md` — document the tag suffix behavior (client sends base name, backend appends suffix)
+- `README.md` — document `GET /users/me/tag/check` endpoint
+- `README.md` — update example account number from `NB0172094612` to `0172094612`
+- `README.md` — update error codes table with `PHONE_MISMATCH` and identity codes
 
-### 4. Rotate exposed credentials
-**Current state:** Firebase service key and Prembly sandbox keys were pasted in chat.
+### 2. Rotate exposed credentials
+**Current state:** Prembly sandbox keys were pasted in chat.
 **Action:**
 - Firebase service account key already rotated ✅
 - Prembly `test_pk_...` and `test_sk_...` still need rotation
 - Rotate from Prembly dashboard before going live
+
+### 3. Run full test suite with real OTP
+**Current state:** Two tests are skipped because they require the real OTP code.
+**Action:**
+- Send an OTP via `POST /otp/email/send`
+- Read the code from the email inbox
+- Set `OTP_CODE` env var and run `pytest tests/test_auth.py -v -s`
+- Confirm all 8 tests pass, 0 skipped
 
 ---
 
@@ -146,11 +147,11 @@ Do not start a new item while anything is in ⚠️ or 🔧. Finish the open ite
 
 ## Working Order (Do Not Deviate)
 
-1. **Fix account number format** — remove `NB`, make 10 digits numeric
-2. **Fix @tag country suffix** — append suffix from profile country
-3. **Fix README gaps** — pin/verify responses, PHONE_MISMATCH
-4. **Rotate Prembly keys** — before any live integration
-5. **Run full test suite** — confirm nothing broke
+1. ✅ **Fix account number format** — remove `NB`, make 10 digits numeric
+2. ✅ **Fix @tag country suffix** — append suffix from profile country
+3. ⚠️ **Fix README gaps** — all the missing sections listed above
+4. ⚠️ **Rotate Prembly keys** — before any live integration
+5. ⚠️ **Run full test suite** with real OTP — confirm all 8 pass
 6. **Commit each fix separately** — one commit per item, no batching
 7. **Build identity module** — after the above are clean
 8. **Then** accounts → currency → funding → ledger → transfers
@@ -160,9 +161,10 @@ Do not start a new item while anything is in ⚠️ or 🔧. Finish the open ite
 ## Known Limitations (Document for Judges)
 
 - Country is immutable after signup (no endpoint to change it)
-- Account numbers are NovaBanq-internal; real NUBANs come from Flutterwave integration
+- Account numbers are 10-digit placeholders. Real NUBANs come from Flutterwave when the virtual accounts module ships.
 - BVN verification returns sandbox test data in dev, not real user data
 - Face match confidence is 0.04 in sandbox (real threshold is 0.70)
 - Firestore security rules not yet written (client never writes directly, so backend-only access is safe for now)
 - No API-level rate limiting beyond OTP/PIN cooldowns
 - No distributed tracing or structured logging beyond standard Python logger
+- No real-time tag availability push — frontend must debounce `GET /users/me/tag/check` calls
