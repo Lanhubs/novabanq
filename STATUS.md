@@ -75,7 +75,25 @@ Do not start a new item while anything is in ⚠️ or 🔧. Finish the open ite
 - Lockout at 5 failed attempts for 20 minutes
 - Constants: `PIN_LENGTH=5`, `PIN_MAX_ATTEMPTS=5`, `PIN_LOCKOUT_MINUTES=20`
 
-### Prembly Integration
+### Documentation
+- `README.md` — full API contract for the Flutter dev
+  - All endpoints documented with request/response examples
+  - Success and error responses for PIN verify and reset
+  - Phone mismatch error updated to `422 PHONE_MISMATCH`
+  - Tag suffix behavior documented (client sends base name)
+  - `GET /users/me/tag/check` endpoint documented
+  - Account number format updated to 10-digit numeric
+  - Error codes table includes `PHONE_MISMATCH` and identity codes
+- `FRONTEND_AUTH_GUIDE.md` — detailed Firebase Auth implementation guide for the Flutter dev
+  - Email/password signup flow
+  - Google Sign-In setup and implementation
+  - Phone verification with SMS OTP
+  - Test phone numbers for local testing
+  - Token handling and refresh
+  - Common errors and fixes
+- `STATUS.md` — this file
+
+### Prembly Integration (credentials verified only — no backend code yet)
 - Sandbox credentials verified working
 - BVN + Face endpoint tested successfully (returned test data)
 - Response shape confirmed: `response_code`, `verification.status`, `watchListed`, `firstName`, `lastName`, `face_data.confidence`
@@ -84,25 +102,15 @@ Do not start a new item while anything is in ⚠️ or 🔧. Finish the open ite
 
 ## ⚠️ Agreed but Not Implemented
 
-### 1. Fix README gaps
-**Current state:** README exists but is missing several sections that the Flutter dev needs.
-**Files to change:**
-- `README.md` — add missing success response for `POST /users/me/pin/verify`
-- `README.md` — add full spec for `POST /users/me/pin/reset`
-- `README.md` — update `403 VALIDATION_ERROR` → `422 PHONE_MISMATCH` for phone mismatch
-- `README.md` — document the tag suffix behavior (client sends base name, backend appends suffix)
-- `README.md` — document `GET /users/me/tag/check` endpoint
-- `README.md` — update example account number from `NB0172094612` to `0172094612`
-- `README.md` — update error codes table with `PHONE_MISMATCH` and identity codes
-
-### 2. Rotate exposed credentials
+### 1. Rotate exposed credentials
 **Current state:** Prembly sandbox keys were pasted in chat.
 **Action:**
 - Firebase service account key already rotated ✅
 - Prembly `test_pk_...` and `test_sk_...` still need rotation
-- Rotate from Prembly dashboard before going live
+- Rotate from Prembly dashboard → Settings → API Keys
+- Update `.env` with new values, restart server
 
-### 3. Run full test suite with real OTP
+### 2. Run full test suite with real OTP
 **Current state:** Two tests are skipped because they require the real OTP code.
 **Action:**
 - Send an OTP via `POST /otp/email/send`
@@ -136,10 +144,10 @@ Do not start a new item while anything is in ⚠️ or 🔧. Finish the open ite
 - Accounts (`GET /accounts/me` with balances)
 - Currency (rates, corridors, seed data)
 - Funding (demo deposits + webhook)
+- Virtual accounts (Flutterwave integration)
 - Ledger (atomic money movement — the core)
 - Transfers (quote + execute)
 - Transactions (history)
-- Virtual accounts (Flutterwave integration)
 - Notifications (welcome + badge)
 - Avatar upload (Cloudinary, signed direct upload)
 
@@ -149,10 +157,10 @@ Do not start a new item while anything is in ⚠️ or 🔧. Finish the open ite
 
 1. ✅ **Fix account number format** — remove `NB`, make 10 digits numeric
 2. ✅ **Fix @tag country suffix** — append suffix from profile country
-3. ⚠️ **Fix README gaps** — all the missing sections listed above
-4. ⚠️ **Rotate Prembly keys** — before any live integration
-5. ⚠️ **Run full test suite** with real OTP — confirm all 8 pass
-6. **Commit each fix separately** — one commit per item, no batching
+3. ✅ **Fix README gaps** — all sections documented
+4. ✅ **Add FRONTEND_AUTH_GUIDE.md** — detailed Firebase Auth implementation guide
+5. ⚠️ **Rotate Prembly keys** — before any live integration
+6. ⚠️ **Run full test suite** with real OTP — confirm all 8 pass
 7. **Build identity module** — after the above are clean
 8. **Then** accounts → currency → funding → ledger → transfers
 
@@ -168,3 +176,4 @@ Do not start a new item while anything is in ⚠️ or 🔧. Finish the open ite
 - No API-level rate limiting beyond OTP/PIN cooldowns
 - No distributed tracing or structured logging beyond standard Python logger
 - No real-time tag availability push — frontend must debounce `GET /users/me/tag/check` calls
+- Email OTP delivery depends on Brevo — if Brevo sandbox stalls, tests will time out
