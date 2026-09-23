@@ -138,9 +138,10 @@ Switch app logic on `error.code`. Do not rely on `error.message` for business de
 | `OTP_TOO_MANY_ATTEMPTS` | Maximum verification attempts reached | Force a new code request |
 | `OTP_RESEND_TOO_SOON` | Resend requested inside cooldown window | Disable the button and show a countdown |
 | `PIN_ALREADY_SET` | Transaction PIN already exists | Route to PIN verify or reset |
-| `PIN_INVALID` | PIN is incorrect (`422`) or not set (`409`) | On `422`, ask user to re-enter the PIN; on `409`, send user to the set-PIN screen |
+| `PIN_INVALID` | PIN is incorrect, or no PIN has been set | Ask user to re-enter the PIN |
 | `PIN_LOCKED` | Too many failed PIN attempts | Block PIN input and show a lockout countdown |
 | `EMAIL_DELIVERY_FAILED` | Outbound email failed to send | Show an inline retry control |
+| `PHONE_MISMATCH` | The phone in the token does not match the profile | Show a "phone doesn't match" error |
 | `INTERNAL_ERROR` | Unhandled backend exception | Show a generic error notice and log it |
 
 ---
@@ -350,14 +351,12 @@ Errors:
 
 | Status | Code | Meaning |
 | --- | --- | --- |
-| `422` | `PIN_INVALID` | Wrong PIN |
-| `409` | `PIN_INVALID` | No PIN has been set on the account |
+| `422` | `PIN_INVALID` | Wrong PIN, or no PIN has been set on the account |
 | `429` | `PIN_LOCKED` | Too many failed attempts, locked for 20 minutes |
 | `404` | `USER_NOT_FOUND` | No profile exists for this user |
+| `401` | `AUTH_REQUIRED` / `AUTH_INVALID` | Token missing, invalid, or expired |
 
-> **Note:** `PIN_INVALID` is returned for both "wrong PIN" and "no PIN set", and only the HTTP status tells them apart. Use `422` to show "Incorrect PIN" and `409` to send the user to the set-PIN screen.
-
-After **5 consecutive failed attempts** the API returns `429 PIN_LOCKED` and locks the PIN for **20 minutes**. Block PIN entry in the UI and show a countdown.
+After **5 consecutive wrong attempts** the PIN locks for **20 minutes** and the API returns `429 PIN_LOCKED`. Block PIN entry in the UI and show a countdown.
 
 #### Reset transaction PIN
 
@@ -391,7 +390,7 @@ Errors:
 
 | Status | Code | Meaning |
 | --- | --- | --- |
-| `403` | `VALIDATION_ERROR` | Token has no `phone_number` claim, or it does not match the phone stored on the profile |
+| `422` | `PHONE_MISMATCH` | Token has no `phone_number` claim, or it does not match the phone stored on the profile |
 | `404` | `USER_NOT_FOUND` | No profile exists for this user |
 | `401` | `AUTH_REQUIRED` / `AUTH_INVALID` | Token missing, invalid, or expired |
 
@@ -507,7 +506,7 @@ Response:
 }
 ```
 
-If the token's `phone_number` claim does not match the phone stored on the profile, the request returns `403` with code `VALIDATION_ERROR`.
+If the token's `phone_number` claim does not match the phone stored on the profile, the request returns `422` with code `PHONE_MISMATCH`.
 
 ### 8.4 Firebase Console setup (required)
 

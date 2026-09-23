@@ -69,8 +69,8 @@ class PinLockedError(NovaBanqError):
 
 
 class PhoneMismatchError(NovaBanqError):
-    status_code = 403
-    code = ErrorCode.VALIDATION_ERROR
+    status_code = 422
+    code = ErrorCode.PHONE_MISMATCH
     message = "The verified phone number does not match this account."
 
 
