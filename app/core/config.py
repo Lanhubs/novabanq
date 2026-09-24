@@ -81,6 +81,23 @@ class Settings(BaseSettings):
     kyc_environment: str = Field(default="sandbox")
 
     # ------------------------------------------------------------------
+    # Cloudinary (image hosting for KYC selfies and avatars)
+    #
+    # Images are uploaded directly from the mobile client using a
+    # short-lived signed payload that this backend generates. The
+    # backend never handles image bytes. Uploads use
+    # ``access_mode=authenticated`` so the asset is not publicly
+    # readable by URL — only a signed URL can fetch it.
+    #
+    # KYC selfies are deleted from Cloudinary immediately after the
+    # verification call returns, regardless of outcome. No biometric
+    # data is retained.
+    # ------------------------------------------------------------------
+    cloudinary_cloud_name: str | None = Field(default=None)
+    cloudinary_api_key: str | None = Field(default=None)
+    cloudinary_api_secret: str | None = Field(default=None)
+
+    # ------------------------------------------------------------------
     # Feature flags
     # ------------------------------------------------------------------
     demo_mode: bool = Field(default=True)
@@ -211,6 +228,35 @@ class Settings(BaseSettings):
             )
 
         return base_url, app_id, api_key
+
+    def require_cloudinary_config(self) -> tuple[str, str, str]:
+        """Return (cloud_name, api_key, api_secret) for Cloudinary.
+
+        Raises RuntimeError with a clear message if any value is
+        missing so the app fails at startup, not on the first
+        signature request.
+        """
+        cloud_name = self.cloudinary_cloud_name
+        api_key = self.cloudinary_api_key
+        api_secret = self.cloudinary_api_secret
+
+        if not cloud_name:
+            raise RuntimeError(
+                "Cloudinary is not fully configured. Missing environment "
+                "variable: CLOUDINARY_CLOUD_NAME"
+            )
+        if not api_key:
+            raise RuntimeError(
+                "Cloudinary is not fully configured. Missing environment "
+                "variable: CLOUDINARY_API_KEY"
+            )
+        if not api_secret:
+            raise RuntimeError(
+                "Cloudinary is not fully configured. Missing environment "
+                "variable: CLOUDINARY_API_SECRET"
+            )
+
+        return cloud_name, api_key, api_secret
 
 
 @lru_cache(maxsize=1)
