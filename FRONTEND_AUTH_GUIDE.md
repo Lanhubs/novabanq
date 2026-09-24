@@ -14,6 +14,7 @@
 4. [Google Sign-In](#4-google-sign-in)
 5. [Phone Verification (SMS OTP)](#5-phone-verification-sms-otp)
 6. [Testing Without Real SMS](#6-testing-without-real-sms)
+6b. [Identity Verification (KYC)](#6b-identity-verification-kyc)
 7. [The Complete Onboarding Flow](#7-the-complete-onboarding-flow)
 8. [Getting the Token in Your HTTP Calls](#8-getting-the-token-in-your-http-calls)
 9. [Handling Token Expiry](#9-handling-token-expiry)
@@ -377,6 +378,140 @@ This exercises the full production flow with no backend bypass required.
 
 ---
 
+## 6b. Identity Verification (KYC)
+
+After the user sets their PIN, they must verify their identity with a BVN and a selfie. This uses Cloudinary for image hosting and Prembly (via the backend) for the actual verification.
+
+### Why the client uploads to Cloudinary, not the backend
+
+The selfie is never sent to the NovaBanq backend. Instead:
+
+1. The backend generates a signed payload.
+2. The Flutter app uploads the selfie **directly to Cloudinary** using that payload.
+3. Cloudinary returns a `public_id`.
+4. The Flutter app sends the `public_id` (not the image) to the backend.
+
+This keeps the backend out of the image byte path — no memory pressure, no timeouts, no bottleneck under load.
+
+### Step 1 — Request a signed upload payload
+
+```
+GET /api/v1/identity/upload-signature
+Authorization: Bearer <token>
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "api_key": "123456789012345",
+    "cloud_name": "novabanq",
+    "folder": "kyc-temp",
+    "timestamp": 1727116800,
+    "access_mode": "authenticated",
+    "signature": "a1b2c3d4e5f6..."
+  },
+  "error": null
+}
+```
+
+### Step 2 — Upload the selfie directly to Cloudinary
+
+```dart
+Future<String> uploadSelfie(File imageFile) async {
+  // 1. Get the signature from the backend
+  final sigResponse = await http.get(
+    Uri.parse('$baseUrl/identity/upload-signature'),
+    headers: await ApiClient.headers(),
+  );
+  final sig = jsonDecode(sigResponse.body)['data'];
+
+  // 2. Build the multipart upload
+  final uri = Uri.parse(
+    'https://api.cloudinary.com/v1_1/${sig['cloud_name']}/image/upload',
+  );
+  final request = http.MultipartRequest('POST', uri)
+    ..fields['api_key'] = sig['api_key']
+    ..fields['timestamp'] = sig['timestamp'].toString()
+    ..fields['folder'] = sig['folder']
+    ..fields['access_mode'] = sig['access_mode']
+    ..fields['signature'] = sig['signature']
+    ..files.add(await http.MultipartFile.fromPath('file', imageFile.path));
+
+  // 3. Send
+  final response = await request.send();
+  final body = jsonDecode(await response.stream.bytesToString());
+
+  // 4. Return the public_id
+  return body['public_id'] as String;
+}
+```
+
+> **Important:** the fields you send to Cloudinary **must match exactly** what the backend signed:
+> - `folder` must be `"kyc-temp"` (not a custom folder)
+> - `access_mode` must be `"authenticated"` (not `"public"`)
+> - `timestamp` must be the exact value from the signature response
+>
+> If any field is changed, Cloudinary will reject the upload with a `401 Invalid signature` error.
+
+### Step 3 — Send the public_id to the backend
+
+```
+POST /api/v1/identity/verify
+Authorization: Bearer <token>
+Content-Type: application/json
+```
+
+```json
+{
+  "bvn": "12345678901",
+  "cloudinary_public_id": "kyc-temp/abc123def456"
+}
+```
+
+**Response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "status": "VERIFIED",
+    "confidence": 0.99,
+    "bvn_masked": "*******8901",
+    "verified_at": "2026-09-24T15:04:44.12Z"
+  },
+  "error": null
+}
+```
+
+### Step 4 — Handle the four possible statuses
+
+The `status` field is one of four values. **Map each to your own localized copy** — the backend does not return user-facing messages.
+
+| Status | Meaning | Suggested frontend behavior |
+|---|---|---|
+| `VERIFIED` | Identity confirmed | Show success, proceed to dashboard |
+| `REJECTED` | Face didn't match | Allow retry with a clearer selfie |
+| `WATCHLISTED` | Record flagged | Hard reject — show "contact support" |
+| `NOT_FOUND` | BVN not in the database | Show "check your BVN and try again" |
+
+### Image cleanup
+
+The uploaded selfie is **automatically deleted** from Cloudinary after the verification completes, regardless of outcome. You do not need to do anything. Do not attempt to reuse the `public_id` — it is gone within seconds of the response.
+
+### Common errors (identity verification)
+
+| Error code | Cause | Fix |
+|---|---|---|
+| `IDENTITY_ALREADY_VERIFIED` | User has already passed verification | Route to dashboard |
+| `IDENTITY_VERIFICATION_FAILED` | Verification rejected | Show retry UI |
+| `IDENTITY_PROVIDER_UNAVAILABLE` | Cloudinary or Prembly is down | Show "try again later" |
+| `VALIDATION_ERROR` | Invalid BVN or public_id format | Check the request payload |
+
+---
+
 ## 7. The Complete Onboarding Flow
 
 ### Email/password signup
@@ -392,7 +527,10 @@ This exercises the full production flow with no backend bypass required.
  8. → Call NovaBanq GET  /users/me/tag/check?tag=david323
  9. → Call NovaBanq POST /users/me/tag               (body: {"tag": "david323"})
 10. → Call NovaBanq POST /users/me/pin               (body: {"pin": "48392"})
-11. → Navigate to Dashboard
+11. → Call NovaBanq GET  /identity/upload-signature  (signed upload payload)
+12. → Upload the selfie directly to Cloudinary
+13. → Call NovaBanq POST /identity/verify            (status: VERIFIED | REJECTED | ...)
+14. → Navigate to Dashboard (if VERIFIED) or retry UI (if REJECTED)
 ```
 
 ### Google Sign-In
@@ -493,6 +631,10 @@ If any API call returns `401 AUTH_INVALID`:
 | `401 AUTH_INVALID` on NovaBanq calls | Token expired | Call `getIdToken(true)` and retry once |
 | `403 EMAIL_NOT_VERIFIED` | User hasn't completed email OTP | Route them back to the OTP screen |
 | "Firebase not initialized" | `Firebase.initializeApp()` not called before an Auth call | Ensure it's awaited in `main()` before `runApp()` |
+| `IDENTITY_ALREADY_VERIFIED` (409) | User has already passed KYC | Route to dashboard |
+| `IDENTITY_VERIFICATION_FAILED` (422) | Verification rejected | Show retry UI |
+| `IDENTITY_PROVIDER_UNAVAILABLE` (502) | KYC or image service down | Show "try again later" |
+| `VALIDATION_ERROR` (422) | Invalid request body | Show field-level errors from `details.fields` |
 
 ---
 
