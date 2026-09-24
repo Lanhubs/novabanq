@@ -1,7 +1,7 @@
 # NovaBanq Backend — Status
 
-**Last updated:** September 23, 2026
-**Scope:** Hackathon MVP — authentication complete, identity module pending.
+**Last updated:** September 24, 2026
+**Scope:** Hackathon MVP — authentication and identity verification complete; money movement pending.
 
 ---
 
@@ -75,6 +75,44 @@ Do not start a new item while anything is in ⚠️ or 🔧. Finish the open ite
 - Lockout at 5 failed attempts for 20 minutes
 - Constants: `PIN_LENGTH=5`, `PIN_MAX_ATTEMPTS=5`, `PIN_LOCKOUT_MINUTES=20`
 
+### Identity Module (KYC) — COMPLETE
+**Provider interface** (`app/infra/identity/base.py`)
+- `IdentityProvider` abstract class with two methods: `verify_bvn_with_face`, `verify_national_id`
+- `IdentityResult` and `VerifiedPerson` dataclasses — frozen, PII-redacted `__repr__`, hashable
+- `VerificationStatus` enum: `VERIFIED`, `REJECTED`, `WATCHLISTED`, `NOT_FOUND`
+- `IdentityProviderError` — pickle-safe, chains `__cause__`
+- `__post_init__` validates status coercion, confidence range, and PII scoping (person only on VERIFIED)
+
+**Real adapter** (`app/infra/identity/african_kyc.py`)
+- Talks to `POST /identitypass/verification/bvn_w_face`
+- Handles response codes `00`, `01`, `02`, `03`, `07`
+- Strict watchlist parsing — fails closed
+- Non-2xx and provider outages raise `IdentityProviderError`
+- Image validation: HTTPS URL, data URI, or raw base64
+- BVN validation: 11 ASCII digits
+
+**Mock adapter** (`app/infra/identity/mock.py`)
+- Deterministic — same BVN produces the same person
+- Sentinel BVNs: `00000000000` → REJECTED, `99999999999` → WATCHLISTED, `11111111111` → NOT_FOUND
+- `is_usable_in_production = False` — factory refuses it in production
+- Validation rules identical to the real adapter
+
+**Cloudinary client** (`app/infra/cloudinary_client.py`)
+- `generate_upload_signature` — signed payload for direct upload, pins `folder` and `access_mode=authenticated`
+- `delete_asset` — best-effort cleanup, never raises
+- `build_authenticated_url` — signed URL for the provider to fetch
+
+**Identity feature** (`app/features/identity/`)
+- `repository.py` — Firestore writes to `identity_verifications/{uid}`, stores masked BVN only
+- `schemas.py` — `VerifyIdentityRequest`, `VerifyIdentityResponse`, `UploadSignatureResponse`
+- `service.py` — provider factory (refuses mock in production), orchestration, Cloudinary cleanup via `BackgroundTasks`
+- `router.py` — `GET /identity/upload-signature`, `POST /identity/verify`
+- Endpoint count: 13 total
+
+**Tests** (`tests/test_mock_parity.py`)
+- 34 tests — validator parity between mock and real adapter, sentinel BVNs, determinism, PII scoping, input rejection
+- Full suite: 40 passed, 2 skipped (real OTP code)
+
 ### Documentation
 - `README.md` — full API contract for the Flutter dev
   - All endpoints documented with request/response examples
@@ -84,19 +122,8 @@ Do not start a new item while anything is in ⚠️ or 🔧. Finish the open ite
   - `GET /users/me/tag/check` endpoint documented
   - Account number format updated to 10-digit numeric
   - Error codes table includes `PHONE_MISMATCH` and identity codes
-- `FRONTEND_AUTH_GUIDE.md` — detailed Firebase Auth implementation guide for the Flutter dev
-  - Email/password signup flow
-  - Google Sign-In setup and implementation
-  - Phone verification with SMS OTP
-  - Test phone numbers for local testing
-  - Token handling and refresh
-  - Common errors and fixes
+- `FRONTEND_AUTH_GUIDE.md` — detailed Firebase Auth implementation guide
 - `STATUS.md` — this file
-
-### Prembly Integration (credentials verified only — no backend code yet)
-- Sandbox credentials verified working
-- BVN + Face endpoint tested successfully (returned test data)
-- Response shape confirmed: `response_code`, `verification.status`, `watchListed`, `firstName`, `lastName`, `face_data.confidence`
 
 ---
 
@@ -111,12 +138,27 @@ Do not start a new item while anything is in ⚠️ or 🔧. Finish the open ite
 - Update `.env` with new values, restart server
 
 ### 2. Run full test suite with real OTP
-**Current state:** Two tests are skipped because they require the real OTP code.
+**Current state:** Two tests in `test_auth.py` are skipped because they require the real OTP code.
 **Action:**
 - Send an OTP via `POST /otp/email/send`
 - Read the code from the email inbox
 - Set `OTP_CODE` env var and run `pytest tests/test_auth.py -v -s`
 - Confirm all 8 tests pass, 0 skipped
+
+### 3. End-to-end identity test (manual)
+**Current state:** Unit tests cover validators and the mock provider. The full loop has not been exercised.
+**Action:**
+- Call `GET /identity/upload-signature` via Swagger
+- Upload a small JPEG to Cloudinary using the returned values
+- Call `POST /identity/verify` with the public_id and a test BVN
+- Confirm the response is `status: "VERIFIED"` under the mock
+
+### 4. Update README with identity endpoints
+**Current state:** The identity endpoints exist but are not documented in `README.md`.
+**Action:**
+- Add a section documenting `GET /identity/upload-signature` and `POST /identity/verify`
+- Update the error codes table with identity-related codes
+- Document the Cloudinary direct upload flow for the Flutter dev
 
 ---
 
@@ -128,19 +170,7 @@ Do not start a new item while anything is in ⚠️ or 🔧. Finish the open ite
 
 ## ❌ Not Started
 
-### Identity Module (KYC)
-**Files created but empty:**
-- `app/infra/identity/` — base.py, schemas.py, african_kyc.py, mock.py
-- `app/features/identity/` — repository.py, schemas.py, service.py, router.py
-**Old providers folder** (`app/features/identity/providers/`) still exists and needs deletion.
-
-**Design agreed:**
-- Single endpoint `POST /identity/verify-bvn-face` takes BVN + face image
-- Provider selected via `KYC_PROVIDER` env var (`mock` or `african_kyc`)
-- On success, flips `identity_verified: true` on the user profile
-- Names are locked once identity_verified is true
-
-### Other Features
+### Money Movement
 - Accounts (`GET /accounts/me` with balances)
 - Currency (rates, corridors, seed data)
 - Funding (demo deposits + webhook)
@@ -148,21 +178,28 @@ Do not start a new item while anything is in ⚠️ or 🔧. Finish the open ite
 - Ledger (atomic money movement — the core)
 - Transfers (quote + execute)
 - Transactions (history)
+
+### Supporting Features
 - Notifications (welcome + badge)
-- Avatar upload (Cloudinary, signed direct upload)
+- Avatar upload (uses the same Cloudinary client already built)
 
 ---
 
 ## Working Order (Do Not Deviate)
 
-1. ✅ **Fix account number format** — remove `NB`, make 10 digits numeric
-2. ✅ **Fix @tag country suffix** — append suffix from profile country
-3. ✅ **Fix README gaps** — all sections documented
-4. ✅ **Add FRONTEND_AUTH_GUIDE.md** — detailed Firebase Auth implementation guide
-5. ⚠️ **Rotate Prembly keys** — before any live integration
-6. ⚠️ **Run full test suite** with real OTP — confirm all 8 pass
-7. **Build identity module** — after the above are clean
-8. **Then** accounts → currency → funding → ledger → transfers
+1. ✅ Foundation — FastAPI, Firebase, Firestore, config, exceptions
+2. ✅ Authentication — Firebase token verification, email OTP, PIN
+3. ✅ Users feature — profile, names, tag, phone, PIN
+4. ✅ Account number format — 10 digits numeric
+5. ✅ @tag country suffix — appended server-side
+6. ✅ README + FRONTEND_AUTH_GUIDE
+7. ✅ Identity module — interface, real + mock adapters, Cloudinary client, service, router, tests
+8. ⚠️ Rotate Prembly keys
+9. ⚠️ Full test suite with real OTP
+10. ⚠️ End-to-end identity test (manual)
+11. ⚠️ Document identity endpoints in README
+12. **Then** accounts → currency → funding → virtual accounts → ledger → transfers → transactions
+13. **Finally** notifications, avatar upload
 
 ---
 
@@ -177,3 +214,5 @@ Do not start a new item while anything is in ⚠️ or 🔧. Finish the open ite
 - No distributed tracing or structured logging beyond standard Python logger
 - No real-time tag availability push — frontend must debounce `GET /users/me/tag/check` calls
 - Email OTP delivery depends on Brevo — if Brevo sandbox stalls, tests will time out
+- Cloudinary cleanup is best-effort; a failed delete leaves the asset in place
+- Provider factory refuses the mock adapter in production, but a misconfiguration could still pick the wrong real provider if the name is wrong
