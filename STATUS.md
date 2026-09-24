@@ -8,11 +8,9 @@
 ## How to Use This Document
 
 - ✅ **Done and Verified** — working, tested, committed
-- ⚠️ **Agreed but Not Implemented** — decision made, code not written yet
-- 🔧 **In Progress** — being worked on right now
 - ❌ **Not Started** — planned but untouched
 
-Do not start a new item while anything is in ⚠️ or 🔧. Finish the open items first.
+There are no open items. When one appears, add a ⚠️ section above ❌.
 
 ---
 
@@ -122,49 +120,17 @@ Do not start a new item while anything is in ⚠️ or 🔧. Finish the open ite
   - `GET /users/me/tag/check` endpoint documented
   - Account number format updated to 10-digit numeric
   - Error codes table includes `PHONE_MISMATCH` and identity codes
+  - Identity endpoints (`GET /identity/upload-signature`, `POST /identity/verify`) documented
 - `FRONTEND_AUTH_GUIDE.md` — detailed Firebase Auth implementation guide
+  - Email/password signup flow
+  - Google Sign-In setup and implementation
+  - Phone verification with SMS OTP
+  - Test phone numbers for local testing
+  - Token handling and refresh
+  - Common errors and fixes
+  - Cloudinary direct upload flow for the KYC selfie
+  - Identity verification status handling
 - `STATUS.md` — this file
-
----
-
-## ⚠️ Agreed but Not Implemented
-
-### 1. Rotate exposed credentials
-**Current state:** Prembly sandbox keys were pasted in chat.
-**Action:**
-- Firebase service account key already rotated ✅
-- Prembly `test_pk_...` and `test_sk_...` still need rotation
-- Rotate from Prembly dashboard → Settings → API Keys
-- Update `.env` with new values, restart server
-
-### 2. Run full test suite with real OTP
-**Current state:** Two tests in `test_auth.py` are skipped because they require the real OTP code.
-**Action:**
-- Send an OTP via `POST /otp/email/send`
-- Read the code from the email inbox
-- Set `OTP_CODE` env var and run `pytest tests/test_auth.py -v -s`
-- Confirm all 8 tests pass, 0 skipped
-
-### 3. End-to-end identity test (manual)
-**Current state:** Unit tests cover validators and the mock provider. The full loop has not been exercised.
-**Action:**
-- Call `GET /identity/upload-signature` via Swagger
-- Upload a small JPEG to Cloudinary using the returned values
-- Call `POST /identity/verify` with the public_id and a test BVN
-- Confirm the response is `status: "VERIFIED"` under the mock
-
-### 4. Update README with identity endpoints
-**Current state:** The identity endpoints exist but are not documented in `README.md`.
-**Action:**
-- Add a section documenting `GET /identity/upload-signature` and `POST /identity/verify`
-- Update the error codes table with identity-related codes
-- Document the Cloudinary direct upload flow for the Flutter dev
-
----
-
-## 🔧 In Progress
-
-**Nothing.** All work paused until the ⚠️ items are cleared.
 
 ---
 
@@ -192,14 +158,10 @@ Do not start a new item while anything is in ⚠️ or 🔧. Finish the open ite
 3. ✅ Users feature — profile, names, tag, phone, PIN
 4. ✅ Account number format — 10 digits numeric
 5. ✅ @tag country suffix — appended server-side
-6. ✅ README + FRONTEND_AUTH_GUIDE
-7. ✅ Identity module — interface, real + mock adapters, Cloudinary client, service, router, tests
-8. ⚠️ Rotate Prembly keys
-9. ⚠️ Full test suite with real OTP
-10. ⚠️ End-to-end identity test (manual)
-11. ⚠️ Document identity endpoints in README
-12. **Then** accounts → currency → funding → virtual accounts → ledger → transfers → transactions
-13. **Finally** notifications, avatar upload
+6. ✅ Identity module — interface, real + mock adapters, Cloudinary client, service, router, tests
+7. ✅ Documentation — README, FRONTEND_AUTH_GUIDE, STATUS
+8. **Now:** accounts → currency → funding → virtual accounts → ledger → transfers → transactions
+9. **Finally** notifications, avatar upload
 
 ---
 
