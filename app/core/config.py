@@ -10,7 +10,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Application configuration loaded from environment variables."""
+    """Application configuration loaded from environment variables.
+
+    Every field has a safe default. Nothing required is missing — if a
+    deployment forgets to set something, either the feature is disabled
+    (demo_mode, kyc_provider=mock) or the failure surfaces at the call
+    site with a clear message via a ``require_*`` helper.
+
+    The class is cached (see ``get_settings``) so this loads exactly
+    once per process.
+    """
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -55,6 +64,23 @@ class Settings(BaseSettings):
     brevo_sender_name: str = Field(default="NovaBanq")
 
     # ------------------------------------------------------------------
+    # KYC / Identity verification
+    #
+    # Vendor-neutral names — the concrete adapter is selected by
+    # ``kyc_provider``. Switching vendors means changing this value and
+    # the adapter file, never the rest of the codebase.
+    #
+    # ``kyc_environment`` is informational (logged at startup). Vendors
+    # distinguish sandbox from live by the key prefix, not by the URL,
+    # so the base URL stays the same in both modes.
+    # ------------------------------------------------------------------
+    kyc_provider: str = Field(default="mock")
+    kyc_base_url: str = Field(default="https://api.prembly.com")
+    kyc_app_id: str | None = Field(default=None)
+    kyc_api_key: str | None = Field(default=None)
+    kyc_environment: str = Field(default="sandbox")
+
+    # ------------------------------------------------------------------
     # Feature flags
     # ------------------------------------------------------------------
     demo_mode: bool = Field(default=True)
@@ -79,6 +105,16 @@ class Settings(BaseSettings):
     @property
     def is_development(self) -> bool:
         return self.app_env.lower() == "development"
+
+    @property
+    def uses_real_kyc(self) -> bool:
+        """True when the app is configured to call a real KYC vendor.
+
+        The mock adapter never needs credentials. Any other value of
+        ``kyc_provider`` does. Callers use this to decide whether to
+        call ``require_kyc_config()`` at startup.
+        """
+        return self.kyc_provider.strip().lower() != "mock"
 
     # ------------------------------------------------------------------
     # Credential resolvers
@@ -146,6 +182,35 @@ class Settings(BaseSettings):
             )
 
         return api_key, sender_email, sender_name
+
+    def require_kyc_config(self) -> tuple[str, str, str]:
+        """Return (base_url, app_id, api_key) for the KYC vendor.
+
+        Only called when ``kyc_provider`` is not ``"mock"``. Raises
+        RuntimeError with a clear message if any value is missing so
+        the app fails at startup, not on the first verification request.
+        """
+        base_url = self.kyc_base_url
+        app_id = self.kyc_app_id
+        api_key = self.kyc_api_key
+
+        if not base_url:
+            raise RuntimeError(
+                "KYC is not fully configured. Missing environment variable: "
+                "KYC_BASE_URL"
+            )
+        if not app_id:
+            raise RuntimeError(
+                "KYC is not fully configured. Missing environment variable: "
+                "KYC_APP_ID"
+            )
+        if not api_key:
+            raise RuntimeError(
+                "KYC is not fully configured. Missing environment variable: "
+                "KYC_API_KEY"
+            )
+
+        return base_url, app_id, api_key
 
 
 @lru_cache(maxsize=1)
