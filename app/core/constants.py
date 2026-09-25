@@ -327,14 +327,16 @@ LEDGER_MAX_LEGS_PER_TRANSACTION = 20
 LEDGER_RATE_SCALE = 1_000_000
 
 # Transfer rules.
-# These are enforced by the transfers, funding, and withdrawal services
-# — NOT by the ledger. The ledger's instruction validator does not
-# enforce a minimum; that is business policy belonging to the calling
-# service, per the ledger's documented scope.
-# Minimum amount for any money movement, expressed in minor units.
-# Prevents zero-value transfers and dust amounts that cost more to
-# process than they move. Tune per corridor when real fees are known.
-LEDGER_MIN_TRANSFER_MINOR = 100
+# Enforced by the transfers, funding, and withdrawal services — NOT by
+# the ledger. The ledger's instruction validator does not enforce a
+# minimum; that is business policy belonging to the calling service,
+# per the ledger's documented scope.
+#
+# Minimum amount for any outbound transfer, expressed in minor units
+# of the sender's currency. Prevents zero-value transfers and dust
+# amounts that cost more to process than they move. Tune per corridor
+# when real fees are known.
+TRANSFER_MIN_AMOUNT_MINOR = 100
 
 # FX rules.
 # A rate is considered fresh for this long. Requests within the window
