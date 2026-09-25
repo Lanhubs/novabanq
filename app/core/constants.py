@@ -64,6 +64,7 @@ class FirestoreCollection(StrEnum):
     TAGS = "tags"
     ACCOUNT_NUMBERS = "account_numbers"
     ACCOUNTS = "accounts"
+    SYSTEM_ACCOUNTS = "system_accounts"
     TRANSACTIONS = "transactions"
     LEDGER_ENTRIES = "ledger_entries"
     CORRIDORS = "corridors"
@@ -77,6 +78,70 @@ class FirestoreCollection(StrEnum):
 class OtpPurpose(StrEnum):
     EMAIL_VERIFICATION = "email_verification"
     PHONE_VERIFICATION = "phone_verification"
+
+
+class AccountType(StrEnum):
+    """Distinguishes user wallets from platform clearing accounts.
+
+    USER   — a real person's wallet. Debits require sufficient balance;
+             the balance never goes negative.
+    SYSTEM — a platform-owned clearing account (FX bridge, fee
+             collector). Not tied to any user. Balances may go negative
+             because these accounts track what the platform owes or
+             holds pending settlement.
+    """
+
+    USER = "USER"
+    SYSTEM = "SYSTEM"
+
+
+class SystemAccountPurpose(StrEnum):
+    """Purpose of a system account. Combined with a currency code by
+    ``system_account_id`` to form the document id, e.g. ``fx_GHS``."""
+
+    FX_BRIDGE = "fx"
+    FEE_COLLECTOR = "fee"
+
+
+class EntryDirection(StrEnum):
+    """Direction of a single ledger entry.
+
+    DEBIT  — money leaves an account. Balance decreases.
+    CREDIT — money enters an account. Balance increases.
+    """
+
+    DEBIT = "DEBIT"
+    CREDIT = "CREDIT"
+
+
+class TransactionType(StrEnum):
+    """High-level category of a money-movement operation."""
+
+    TRANSFER = "TRANSFER"
+    FUNDING = "FUNDING"
+    WITHDRAWAL = "WITHDRAWAL"
+    REVERSAL = "REVERSAL"
+
+
+class TransactionStatus(StrEnum):
+    """Lifecycle state of a transaction.
+
+    The ledger writes transactions in a single atomic commit: the
+    transaction document and its ledger entries are written together,
+    or not at all. In practice every persisted ``TransactionDocument``
+    has ``status=SETTLED``; a transaction that fails to balance or
+    would leave a user account negative aborts before anything is
+    written.
+
+    PENDING and FAILED remain valid values, reserved for a possible
+    future two-phase flow (write PENDING first, settle or fail it in a
+    second write) that would let a failed attempt leave a persisted
+    audit trail. That flow is not implemented today.
+    """
+
+    PENDING = "PENDING"
+    SETTLED = "SETTLED"
+    FAILED = "FAILED"
 
 
 class ErrorCode(StrEnum):
@@ -107,8 +172,84 @@ class ErrorCode(StrEnum):
     IDENTITY_VERIFICATION_FAILED = "IDENTITY_VERIFICATION_FAILED"
     IDENTITY_ALREADY_VERIFIED = "IDENTITY_ALREADY_VERIFIED"
     IDENTITY_PROVIDER_UNAVAILABLE = "IDENTITY_PROVIDER_UNAVAILABLE"
+    LEDGER_ENTRY_INVALID = "LEDGER_ENTRY_INVALID"
+    LEDGER_PRECONDITION_VIOLATED = "LEDGER_PRECONDITION_VIOLATED"
+    LEDGER_UNBALANCED = "LEDGER_UNBALANCED"
     VALIDATION_ERROR = "VALIDATION_ERROR"
     INTERNAL_ERROR = "INTERNAL_ERROR"
+
+
+# ---------------------------------------------------------------------------
+# System account ids
+# ---------------------------------------------------------------------------
+
+def system_account_id(
+    purpose: SystemAccountPurpose,
+    currency: Currency,
+) -> str:
+    """Return the canonical document id for a system account.
+
+    The single source of truth for system account ids. Never construct
+    these strings manually — always go through this function so a typo
+    cannot silently route a ledger operation to a missing account.
+
+    Format is ``<purpose>_<currency>`` with a lowercase purpose and an
+    uppercase currency: ``fx_GHS``, ``fee_NGN``.
+
+    Args:
+        purpose: The account's purpose (FX bridge, fee collector).
+        currency: The currency the account holds.
+
+    Returns:
+        A document id, e.g. ``"fx_GHS"`` or ``"fee_NGN"``.
+    """
+    return f"{purpose.value}_{currency.value}"
+
+
+def parse_system_account_id(
+    account_id: str,
+) -> tuple[SystemAccountPurpose, Currency]:
+    """Inverse of ``system_account_id``.
+
+    Splits a system account id back into its purpose and currency, with
+    validation against the known enum members. Used by the ledger's
+    instruction validator to reject malformed system account ids at
+    construction time rather than letting a bad id reach Firestore.
+
+    Args:
+        account_id: A string like ``"fx_GHS"``.
+
+    Returns:
+        A ``(purpose, currency)`` tuple.
+
+    Raises:
+        ValueError: If the id is not of the form ``<purpose>_<currency>``
+            or either part is not a recognised enum member.
+    """
+    parts = account_id.split("_", 1)
+    if len(parts) != 2:
+        raise ValueError(
+            f"System account id must be '<purpose>_<currency>', got "
+            f"{account_id!r}."
+        )
+
+    purpose_str, currency_str = parts
+    try:
+        purpose = SystemAccountPurpose(purpose_str)
+    except ValueError as exc:
+        raise ValueError(
+            f"Unknown system account purpose {purpose_str!r} in "
+            f"{account_id!r}."
+        ) from exc
+
+    try:
+        currency = Currency(currency_str)
+    except ValueError as exc:
+        raise ValueError(
+            f"Unknown currency {currency_str!r} in {account_id!r}."
+        ) from exc
+
+    return purpose, currency
 
 
 # Account number format: 2-digit country prefix + 8 random digits = 10 numeric digits.
@@ -138,6 +279,24 @@ PIN_LOCKOUT_MINUTES = 20
 # Identity verification rules.
 IDENTITY_BVN_LENGTH = 11
 IDENTITY_FACE_MIN_CONFIDENCE = 0.70
+
+# Ledger rules.
+# Maximum number of instructions (legs) a single ledger operation may
+# contain. This is a conservative business rule, not the Firestore
+# document limit (which is 500). A GHS→NGN transfer is 5 legs; 20
+# leaves room for multi-hop corridors without letting a caller
+# construct a pathological instruction set that would be slow and
+# hard to reason about.
+LEDGER_MAX_LEGS_PER_TRANSACTION = 20
+# Minimum amount for any money movement, expressed in minor units.
+# Prevents zero-value transfers and dust amounts that cost more to
+# process than they move. Tune per corridor when real fees are known.
+LEDGER_MIN_TRANSFER_MINOR = 100
+# Scale factor for storing the FX rate as an integer. A rate of 116.5
+# is stored as 116_500_000 (116.5 × 10^6). Six decimal places is
+# enough precision for every African corridor and keeps the ledger a
+# pure-integer system.
+LEDGER_RATE_SCALE = 1_000_000
 
 # FX rate validity window (seconds) — rate locks for the frontend.
 RATE_LOCK_SECONDS = 45
