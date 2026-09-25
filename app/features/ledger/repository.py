@@ -700,4 +700,4 @@ def _transaction_to_dict(doc: TransactionDocument) -> dict[str, Any]:
         "rate_scaled": doc.rate_scaled,
         "created_at": SERVER_TIMESTAMP,
         "settled_at": SERVER_TIMESTAMP,
-    }
+    };
