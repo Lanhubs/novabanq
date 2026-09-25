@@ -20,12 +20,13 @@ Backend API for the NovaBanq mobile app, a pan-African payments platform.
 6. [Onboarding Flow](#6-onboarding-flow)
 7. [Endpoint Reference](#7-endpoint-reference)
 8. [Phone Verification (Firebase Phone Auth)](#8-phone-verification-firebase-phone-auth)
-9. [Testing and Integration](#9-testing-and-integration)
-10. [What Is Real vs Mocked](#10-what-is-real-vs-mocked)
-11. [Project Structure](#11-project-structure)
-12. [Local Backend Setup](#12-local-backend-setup)
-13. [Running Tests](#13-running-tests)
-14. [Support](#14-support)
+9. [Identity Verification (KYC)](#9-identity-verification-kyc)
+10. [Testing and Integration](#10-testing-and-integration)
+11. [What Is Real vs Mocked](#11-what-is-real-vs-mocked)
+12. [Project Structure](#12-project-structure)
+13. [Local Backend Setup](#13-local-backend-setup)
+14. [Running Tests](#14-running-tests)
+15. [Support](#15-support)
 
 ---
 
@@ -144,36 +145,44 @@ Switch app logic on `error.code`. Do not rely on `error.message` for business de
 | `PHONE_MISMATCH` | The phone in the token does not match the profile | Show a "phone doesn't match" error |
 | `IDENTITY_VERIFICATION_FAILED` | BVN or face verification rejected | Show retry, or contact support |
 | `IDENTITY_ALREADY_VERIFIED` | Identity already verified, names locked | Route to dashboard |
-| `IDENTITY_PROVIDER_UNAVAILABLE` | KYC provider is down | Show retry later message |
-| `INTERNAL_ERROR` | Unhandled backend exception | Show a generic error notice and log it |
+| `IDENTITY_PROVIDER_UNAVAILABLE` | KYC provider, Cloudinary, or the verification repository is down | Show retry later message |
+| `INTERNAL_ERROR` | Unhandled backend exception, including Cloudinary misconfiguration on `GET /identity/upload-signature` | Show a generic error notice and log it |
 
 ---
 
 ## 6. Onboarding Flow
 
-Follow this order. Steps 5 to 7 (tag, PIN) are the same for both sign-up methods; only the email OTP steps differ.
+Follow this order. Steps 5 to 10 (tag, PIN, identity) are the same for both sign-up methods; only the email OTP steps differ.
 
 ```text
 Email + password registration
 -----------------------------
-1. Firebase client: createUserWithEmailAndPassword(email, password)
-2. POST /otp/email/send        -> 200 OK
-3. User enters the code from their email
-4. POST /otp/email/verify      -> 200 OK
-5. POST /users/me              -> 201 Created (creates profile + account_number)
-6. POST /users/me/tag          -> 200 OK      (claims the @tag)
-7. POST /users/me/pin          -> 201 Created (sets the 5-digit PIN)
-8. Navigate to the home screen
+1.  Firebase client: createUserWithEmailAndPassword(email, password)
+2.  POST /otp/email/send             -> 200 OK
+3.  User enters the code from their email
+4.  POST /otp/email/verify           -> 200 OK
+5.  POST /users/me                   -> 201 Created (creates profile + account_number)
+6.  POST /users/me/tag               -> 200 OK      (claims the @tag)
+7.  POST /users/me/pin               -> 201 Created (sets the 5-digit PIN)
+8.  GET  /identity/upload-signature  -> 200 OK      (signed payload)
+9.  [Upload selfie directly to Cloudinary]
+10. POST /identity/verify            -> 200 OK      (VERIFIED | REJECTED | WATCHLISTED | NOT_FOUND)
+11. Navigate to the home screen
 
 
 Google sign-in registration
 ---------------------------
 1. Firebase client: signInWithCredential(...)
-2. POST /users/me              -> 201 Created (email OTP is skipped)
-3. POST /users/me/tag          -> 200 OK
-4. POST /users/me/pin          -> 201 Created
-5. Navigate to the home screen
+2. POST /users/me                   -> 201 Created (email OTP is skipped)
+3. POST /users/me/tag               -> 200 OK
+4. POST /users/me/pin               -> 201 Created
+5. GET  /identity/upload-signature  -> 200 OK      (signed payload)
+6. [Upload selfie directly to Cloudinary]
+7. POST /identity/verify            -> 200 OK      (VERIFIED | REJECTED | WATCHLISTED | NOT_FOUND)
+8. Navigate to the home screen
 ```
+
+> See [Section 9](#9-identity-verification-kyc) for the full identity verification flow.
 
 > **UI guidance (Google sign-in):** At the profile step, always ask the user to enter or confirm their First, Middle, and Last name manually. Legal names must match their identity documents for KYC.
 
@@ -573,7 +582,86 @@ Phone verification happens **on the dashboard after signup**, not during onboard
 
 ---
 
-## 9. Testing and Integration
+## 9. Identity Verification (KYC)
+
+Two endpoints support the BVN + selfie verification flow. The selfie is uploaded directly to Cloudinary by the mobile client — the backend never handles image bytes.
+
+### 9.1 Step 1 — Get a signed upload payload
+
+```http
+GET /identity/upload-signature
+Authorization: Bearer <token>
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "api_key": "123456789012345",
+    "cloud_name": "novabanq",
+    "folder": "kyc-temp",
+    "timestamp": 1727116800,
+    "access_mode": "authenticated",
+    "signature": "a1b2c3d4e5f6..."
+  },
+  "error": null
+}
+```
+
+The mobile client POSTs these values plus the image file to Cloudinary's upload endpoint. The signature authorizes the upload and pins the folder and access mode — the client cannot override them.
+
+### 9.2 Step 2 — Send the Cloudinary `public_id` to the backend
+
+```http
+POST /identity/verify
+Authorization: Bearer <token>
+Content-Type: application/json
+```
+
+```json
+{
+  "bvn": "12345678901",
+  "cloudinary_public_id": "kyc-temp/abc123def456"
+}
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "status": "VERIFIED",
+    "confidence": 0.99,
+    "bvn_masked": "*******8901",
+    "verified_at": "2026-09-24T15:04:44.12Z"
+  },
+  "error": null
+}
+```
+
+### 9.3 The `status` field
+
+| Status | Meaning | Client behavior |
+| --- | --- | --- |
+| `VERIFIED` | Identity confirmed | Proceed to dashboard |
+| `REJECTED` | Face did not match | Allow retry with a clearer selfie |
+| `WATCHLISTED` | Record flagged | Hard reject — contact support |
+| `NOT_FOUND` | BVN not in the database | Prompt the user to check the BVN |
+
+### 9.4 Notes
+
+* The selfie is deleted from Cloudinary automatically once the check completes, regardless of outcome. Do not attempt to reuse the `public_id`.
+* Once a user is verified, calling `POST /identity/verify` again returns `409 IDENTITY_ALREADY_VERIFIED`.
+* The full BVN is never returned to the client. Only the last 4 digits are visible, masked.
+* The face image is never returned to the client.
+* `GET /identity/upload-signature` doesn't reserve or validate anything — it just proves the upload was authorized. Calling it repeatedly is safe.
+
+---
+
+## 10. Testing and Integration
 
 ### 9.1 Swagger UI
 
@@ -595,7 +683,7 @@ Copy `idToken` from the response and use it as the Bearer token.
 
 ---
 
-## 10. What Is Real vs Mocked
+## 11. What Is Real vs Mocked
 
 Current scope is a hackathon build.
 
@@ -605,8 +693,9 @@ Current scope is a hackathon build.
 | Firestore database | Production-ready | Real persistence |
 | Email OTP | Production-ready | Sent via Brevo |
 | Phone verification | Production-ready | Firebase native SMS |
-| BVN / identity check | Mock | Passes on regex format check only |
-| Biometric face sync | Mock | Returns deterministic positive responses |
+| BVN / face verification | Real | Via Prembly sandbox (configurable via `KYC_PROVIDER`) |
+| National ID verification | Not implemented | — |
+| KYC image hosting | Real | Selfies uploaded directly to Cloudinary by the client, deleted once verification completes |
 | Account numbers | Placeholder | 10-digit NovaBanq-internal numbers. Not real bank accounts — will be replaced with real NUBANs once virtual accounts go live via Flutterwave. |
 | Virtual accounts (Flutterwave) | Not yet implemented | — |
 | Ledger / transfer engine | Under construction | Planned for a future build |
@@ -614,7 +703,7 @@ Current scope is a hackathon build.
 
 ---
 
-## 11. Project Structure
+## 12. Project Structure
 
 ```text
 app/
@@ -627,7 +716,7 @@ app/
     ├── otp/                 Email verification delivery
     ├── tags/                Unique @tag handles
     ├── account_numbers/     Account number generation
-    ├── identity/            Government ID / BVN validation (mocked)
+    ├── identity/            BVN + selfie KYC via Prembly, Cloudinary upload signing
     ├── virtual_accounts/    Payment gateway bridge (Flutterwave sandbox)
     ├── accounts/            Balances (planned)
     ├── funding/             Inbound deposits (planned)
@@ -648,7 +737,7 @@ Each feature module has four layers:
 
 ---
 
-## 12. Local Backend Setup
+## 13. Local Backend Setup
 
 ```bash
 # Create a virtual environment
@@ -674,7 +763,7 @@ uvicorn app.main:app --reload
 
 ---
 
-## 13. Running Tests
+## 14. Running Tests
 
 ```bash
 pytest tests/ -v -s
@@ -684,7 +773,7 @@ pytest tests/ -v -s
 
 ---
 
-## 14. Support
+## 15. Support
 
 * **API specs and contracts:** contact the primary backend engineer.
 * **Authentication platform:** check the project's Firebase Console settings.
