@@ -551,6 +551,12 @@ def _build_transaction_document(
     ``LedgerRequest.__post_init__``. This function reads them and
     coerces the currency strings into enum members.
 
+    A "from" side or a "to" side may be absent — FUNDING has no "from"
+    side and WITHDRAWAL has no "to" side, because that side's leg is
+    outside the ledger. Each side's currency and amount are present
+    together or absent together, matching the schema's own
+    ``_verify_amounts_and_currencies``.
+
     Args:
         request: The validated ledger request.
         now: A client-side datetime used to satisfy the dataclass's
@@ -562,42 +568,50 @@ def _build_transaction_document(
         A populated ``TransactionDocument``.
 
     Raises:
-        LedgerPreconditionViolatedError: A currency is missing or
-            unrecognised in metadata, or a cross-currency request
-            lacks ``rate_scaled``.
+        LedgerPreconditionViolatedError: A currency value is
+            unrecognised, or a cross-currency request lacks
+            ``rate_scaled``.
     """
     meta = request.metadata
 
-    from_currency_raw = meta.get("from_currency")
-    to_currency_raw = meta.get("to_currency")
+    def _currency(key: str) -> Currency | None:
+        raw = meta.get(key)
+        if raw is None:
+            return None
+        try:
+            return Currency(raw)
+        except ValueError as exc:
+            raise LedgerPreconditionViolatedError(
+                f"Transaction metadata contains an unrecognised "
+                f"{key}: {exc}."
+            ) from exc
 
-    if from_currency_raw is None or to_currency_raw is None:
-        raise LedgerPreconditionViolatedError(
-            "Transaction metadata must include from_currency and "
-            "to_currency."
-        )
+    def _amount(key: str) -> int | None:
+        raw = meta.get(key)
+        return None if raw is None else int(raw)
 
-    try:
-        from_currency = Currency(from_currency_raw)
-        to_currency = Currency(to_currency_raw)
-    except ValueError as exc:
-        raise LedgerPreconditionViolatedError(
-            f"Transaction metadata contains an unrecognised currency: {exc}."
-        ) from exc
+    from_currency = _currency("from_currency")
+    to_currency = _currency("to_currency")
+    from_amount_minor = _amount("from_amount_minor")
+    to_amount_minor = _amount("to_amount_minor")
 
-    # rate_scaled is required only for cross-currency transactions.
-    # Explicit per-branch narrowing so the type checker can prove the
-    # value is not None when we call int() on it.
+    # ``rate_scaled`` is required only when both currencies are present
+    # and differ — matching the schema's cross-currency rule.
+    cross_currency = (
+        from_currency is not None
+        and to_currency is not None
+        and from_currency is not to_currency
+    )
     rate_scaled: int | None
-    if from_currency is to_currency:
-        rate_scaled = None
-    else:
+    if cross_currency:
         rate_scaled_raw = meta.get("rate_scaled")
         if rate_scaled_raw is None:
             raise LedgerPreconditionViolatedError(
                 "rate_scaled is required for cross-currency transactions."
             )
         rate_scaled = int(rate_scaled_raw)
+    else:
+        rate_scaled = None
 
     return TransactionDocument(
         transaction_id=request.transaction_id,
@@ -606,10 +620,12 @@ def _build_transaction_document(
         idempotency_key=request.idempotency_key,
         sender_uid=meta.get("sender_uid"),
         recipient_uid=meta.get("recipient_uid"),
+        sender_snapshot=meta.get("sender_snapshot"),
+        recipient_snapshot=meta.get("recipient_snapshot"),
         from_currency=from_currency,
         to_currency=to_currency,
-        from_amount_minor=int(meta.get("from_amount_minor", 0)),
-        to_amount_minor=int(meta.get("to_amount_minor", 0)),
+        from_amount_minor=from_amount_minor,
+        to_amount_minor=to_amount_minor,
         fee_minor=int(meta.get("fee_minor", 0)),
         rate_scaled=rate_scaled,
         created_at=now,
@@ -677,7 +693,9 @@ def _transaction_to_dict(doc: TransactionDocument) -> dict[str, Any]:
 
     Note: ``created_at`` and ``settled_at`` are written as
     ``SERVER_TIMESTAMP`` rather than the dataclass's datetime fields —
-    same rationale as ``_entry_to_dict``.
+    same rationale as ``_entry_to_dict``. ``from_currency``,
+    ``to_currency``, ``from_amount_minor``, and ``to_amount_minor``
+    may be None for FUNDING and WITHDRAWAL — see the module docstring.
 
     Args:
         doc: The transaction document to serialize.
@@ -692,12 +710,18 @@ def _transaction_to_dict(doc: TransactionDocument) -> dict[str, Any]:
         "idempotency_key": doc.idempotency_key,
         "sender_uid": doc.sender_uid,
         "recipient_uid": doc.recipient_uid,
-        "from_currency": doc.from_currency.value,
-        "to_currency": doc.to_currency.value,
+        "sender_snapshot": doc.sender_snapshot,
+        "recipient_snapshot": doc.recipient_snapshot,
+        "from_currency": (
+            doc.from_currency.value if doc.from_currency is not None else None
+        ),
+        "to_currency": (
+            doc.to_currency.value if doc.to_currency is not None else None
+        ),
         "from_amount_minor": doc.from_amount_minor,
         "to_amount_minor": doc.to_amount_minor,
         "fee_minor": doc.fee_minor,
         "rate_scaled": doc.rate_scaled,
         "created_at": SERVER_TIMESTAMP,
         "settled_at": SERVER_TIMESTAMP,
-    };
+    }
