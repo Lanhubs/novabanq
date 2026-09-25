@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.core.constants import (
+    COUNTRY_CURRENCY,
     COUNTRY_TAG_SUFFIX,
     PIN_LOCKOUT_MINUTES,
     PIN_MAX_ATTEMPTS,
@@ -98,22 +99,16 @@ class UnsupportedCountryError(NovaBanqError):
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-# Country → default settlement currency. Extend as new corridors launch.
-_DEFAULT_CURRENCY_BY_COUNTRY: dict[str, Currency] = {
-    Country.NIGERIA: Currency.NGN,
-    Country.GHANA: Currency.GHS,
-    Country.KENYA: Currency.KES,
-    Country.SENEGAL: Currency.XOF,
-    Country.IVORY_COAST: Currency.XOF,
-    Country.SOUTH_AFRICA: Currency.ZAR,
-}
-
 _GOOGLE_SIGN_IN_PROVIDER = "google.com"
 
 
 def _default_currency(country: Country) -> Currency:
-    """Return the default settlement currency for a country."""
-    currency = _DEFAULT_CURRENCY_BY_COUNTRY.get(country)
+    """Return the default settlement currency for a country.
+
+    Reads the single shared ``COUNTRY_CURRENCY`` map from constants so
+    the country → currency mapping lives in exactly one place.
+    """
+    currency = COUNTRY_CURRENCY.get(country)
     if currency is None:
         raise UnsupportedCountryError()
     return currency
@@ -150,12 +145,15 @@ def _has_verified_email_otp(uid: str) -> bool:
     return otp_service.has_verified_marker(uid, OtpPurpose.EMAIL_VERIFICATION)
 
 
-def _build_full_tag(base_tag: str, country: str) -> str:
+def _build_full_tag(base_tag: str, country: Country) -> str:
     """Append the country suffix to a base tag.
 
     Args:
         base_tag: The tag name without any suffix (e.g. "david323").
-        country: Two-letter ISO country code from the user's profile.
+        country: The user's country. Typed as ``Country`` rather than
+            ``str`` so the shared ``COUNTRY_TAG_SUFFIX`` map (keyed by
+            ``Country``) can be looked up without coercion and a typo
+            can't silently produce a tag with no suffix.
 
     Returns:
         The full tag with suffix (e.g. "david323.ng").
@@ -167,6 +165,23 @@ def _build_full_tag(base_tag: str, country: str) -> str:
     if suffix is None:
         raise UnsupportedCountryError()
     return f"{base_tag}{TAG_SUFFIX_SEPARATOR}{suffix}"
+
+
+def _profile_country(profile: dict[str, Any]) -> Country:
+    """Return the profile's country, coerced from its stored string.
+
+    The Firestore document stores ``country`` as a plain string (it
+    was written as a ``Country`` enum value, but Firestore holds the
+    string form). This helper does the coercion in one place and
+    raises ``UnsupportedCountryError`` if the stored value isn't a
+    recognised member — a data integrity issue that would otherwise
+    surface as a ``ValueError`` deep in tag construction.
+    """
+    raw = profile.get("country")
+    try:
+        return Country(raw)
+    except ValueError as exc:
+        raise UnsupportedCountryError() from exc
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +319,8 @@ def check_tag_available(uid: str, base_tag: str) -> dict[str, Any]:
         UserNotFoundError: If the caller has no profile.
     """
     profile = get_profile(uid)
-    full_tag = _build_full_tag(base_tag, profile["country"])
+    country = _profile_country(profile)
+    full_tag = _build_full_tag(base_tag, country)
 
     available = tags_service.is_available(full_tag)
     return {"tag": full_tag, "available": available}
@@ -321,7 +337,8 @@ def claim_tag(uid: str, base_tag: str) -> dict[str, Any]:
         TagTakenError: If the full tag is already claimed by another user.
     """
     profile = get_profile(uid)
-    full_tag = _build_full_tag(base_tag, profile["country"])
+    country = _profile_country(profile)
+    full_tag = _build_full_tag(base_tag, country)
 
     if profile.get("tag") == full_tag:
         return profile

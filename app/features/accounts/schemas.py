@@ -37,7 +37,7 @@ from app.core.constants import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _format_balance(balance_minor: int, currency: str) -> str:
+def _format_balance(balance_minor: int, currency: Currency) -> str:
     """Format a minor-unit balance as a human-readable decimal string.
 
     Currencies with no minor unit (XOF) are rendered as whole numbers.
@@ -50,8 +50,11 @@ def _format_balance(balance_minor: int, currency: str) -> str:
 
     Args:
         balance_minor: Integer balance in the smallest currency unit.
-        currency: Currency code (e.g. "NGN", "GHS"). Must exist in
-            ``CURRENCY_MINOR_UNITS``.
+        currency: A ``Currency`` enum member. Typed as the enum rather
+            than ``str`` so the shared ``CURRENCY_MINOR_UNITS`` map
+            (keyed by ``Currency``) can be looked up without coercion,
+            and a bad currency code fails at the type checker rather
+            than producing a runtime ``ValueError``.
 
     Returns:
         A display string, e.g. ``"50,000.00"`` for NGN 50000, or
@@ -78,6 +81,26 @@ def _format_balance(balance_minor: int, currency: str) -> str:
         formatted = f"{major:,}.{fractional}"
 
     return f"-{formatted}" if negative else formatted
+
+
+def _coerce_currency(value: Any) -> Currency:
+    """Coerce a stored currency string to a ``Currency`` enum member.
+
+    Firestore stores the currency as a plain string (the enum's
+    ``.value`` was written on the way in). This helper does the
+    coercion in one place so both response builders fail with a clear
+    message on a corrupt stored value instead of a raw ``ValueError``
+    from the enum constructor.
+
+    Raises:
+        ValueError: If the value is not a recognised ``Currency``.
+    """
+    try:
+        return Currency(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"Stored document holds an unrecognised currency {value!r}."
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -144,13 +167,12 @@ def build_account_response(account: dict[str, Any]) -> AccountResponse:
 
     Raises:
         ValueError: If the account document is missing required fields,
-            the balance is negative, or the currency has no configured
-            minor unit.
+            the balance is negative, or the currency is not recognised.
     """
-    currency = account.get("currency")
+    currency_raw = account.get("currency")
     balance_minor = account.get("balance_minor")
 
-    if currency is None or balance_minor is None:
+    if currency_raw is None or balance_minor is None:
         raise ValueError(
             "Account document is missing 'currency' or 'balance_minor'."
         )
@@ -162,6 +184,8 @@ def build_account_response(account: dict[str, Any]) -> AccountResponse:
         raise ValueError(
             f"User account balance cannot be negative, got {balance_minor}."
         )
+
+    currency = _coerce_currency(currency_raw)
 
     return AccountResponse(
         currency=currency,
@@ -241,11 +265,11 @@ def build_system_account_response(
 
     Raises:
         ValueError: If the document is missing required fields, or the
-            currency has no configured minor unit.
+            currency is not recognised.
     """
     system_id = account.get("system_id")
     purpose = account.get("purpose")
-    currency = account.get("currency")
+    currency_raw = account.get("currency")
     balance_minor = account.get("balance_minor")
 
     # Explicit per-field checks so the type checker narrows each
@@ -255,10 +279,12 @@ def build_system_account_response(
         raise ValueError("System account document is missing 'system_id'.")
     if purpose is None:
         raise ValueError("System account document is missing 'purpose'.")
-    if currency is None:
+    if currency_raw is None:
         raise ValueError("System account document is missing 'currency'.")
     if balance_minor is None:
         raise ValueError("System account document is missing 'balance_minor'.")
+
+    currency = _coerce_currency(currency_raw)
 
     return SystemAccountResponse(
         system_id=system_id,

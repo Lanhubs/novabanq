@@ -26,7 +26,7 @@ class Country(StrEnum):
 
 # Minor unit multipliers — how many minor units make one major unit.
 # XOF has no minor unit (West African CFA franc is a zero-decimal currency).
-CURRENCY_MINOR_UNITS: dict[str, int] = {
+CURRENCY_MINOR_UNITS: dict[Currency, int] = {
     Currency.NGN: 100,
     Currency.GHS: 100,
     Currency.KES: 100,
@@ -36,7 +36,7 @@ CURRENCY_MINOR_UNITS: dict[str, int] = {
 
 
 # Country → ISO numeric prefix used in NovaBanq account numbers.
-ACCOUNT_NUMBER_COUNTRY_PREFIX: dict[str, str] = {
+ACCOUNT_NUMBER_COUNTRY_PREFIX: dict[Country, str] = {
     Country.NIGERIA: "01",
     Country.GHANA: "02",
     Country.KENYA: "03",
@@ -46,10 +46,24 @@ ACCOUNT_NUMBER_COUNTRY_PREFIX: dict[str, str] = {
 }
 
 
+# Country → default settlement currency. A user's currency is derived
+# from their country at signup — the client never states one. This is
+# not one-to-one: Senegal and Ivory Coast are both in the West African
+# monetary union and both settle in XOF.
+COUNTRY_CURRENCY: dict[Country, Currency] = {
+    Country.NIGERIA: Currency.NGN,
+    Country.GHANA: Currency.GHS,
+    Country.KENYA: Currency.KES,
+    Country.SENEGAL: Currency.XOF,
+    Country.IVORY_COAST: Currency.XOF,
+    Country.SOUTH_AFRICA: Currency.ZAR,
+}
+
+
 # Country → lowercase suffix appended to the user's @tag.
 # The suffix is derived from the profile country, never from user input.
 # Example: a user in Nigeria who claims "david" is stored as "david.ng".
-COUNTRY_TAG_SUFFIX: dict[str, str] = {
+COUNTRY_TAG_SUFFIX: dict[Country, str] = {
     Country.NIGERIA: "ng",
     Country.GHANA: "gh",
     Country.KENYA: "ke",
@@ -144,6 +158,21 @@ class TransactionStatus(StrEnum):
     FAILED = "FAILED"
 
 
+class RateSource(StrEnum):
+    """Where a corridor's current rate came from.
+
+    MANUAL     — set by an admin or seeded at deploy time. Never
+                 refreshed by the service; used for the demo corridors
+                 so the pitch cannot break on a third-party outage.
+    FXRATESAPI — fetched from the live FX provider and cached with a
+                 ``fetched_at`` timestamp. Refreshed on the next request
+                 once the cache window expires.
+    """
+
+    MANUAL = "manual"
+    FXRATESAPI = "fxratesapi"
+
+
 class ErrorCode(StrEnum):
     AUTH_REQUIRED = "AUTH_REQUIRED"
     AUTH_INVALID = "AUTH_INVALID"
@@ -158,6 +187,8 @@ class ErrorCode(StrEnum):
     CORRIDOR_UNSUPPORTED = "CORRIDOR_UNSUPPORTED"
     DUPLICATE_TRANSFER = "DUPLICATE_TRANSFER"
     RATE_EXPIRED = "RATE_EXPIRED"
+    RATE_UNAVAILABLE = "RATE_UNAVAILABLE"
+    FX_PROVIDER_UNAVAILABLE = "FX_PROVIDER_UNAVAILABLE"
     AMOUNT_INVALID = "AMOUNT_INVALID"
     OTP_INVALID = "OTP_INVALID"
     OTP_EXPIRED = "OTP_EXPIRED"
@@ -289,17 +320,32 @@ IDENTITY_FACE_MIN_CONFIDENCE = 0.70
 # construct a pathological instruction set that would be slow and
 # hard to reason about.
 LEDGER_MAX_LEGS_PER_TRANSACTION = 20
-# Minimum amount for any money movement, expressed in minor units.
-# Prevents zero-value transfers and dust amounts that cost more to
-# process than they move. Tune per corridor when real fees are known.
-LEDGER_MIN_TRANSFER_MINOR = 100
 # Scale factor for storing the FX rate as an integer. A rate of 116.5
 # is stored as 116_500_000 (116.5 × 10^6). Six decimal places is
 # enough precision for every African corridor and keeps the ledger a
 # pure-integer system.
 LEDGER_RATE_SCALE = 1_000_000
 
-# FX rate validity window (seconds) — rate locks for the frontend.
+# Transfer rules.
+# These are enforced by the transfers, funding, and withdrawal services
+# — NOT by the ledger. The ledger's instruction validator does not
+# enforce a minimum; that is business policy belonging to the calling
+# service, per the ledger's documented scope.
+# Minimum amount for any money movement, expressed in minor units.
+# Prevents zero-value transfers and dust amounts that cost more to
+# process than they move. Tune per corridor when real fees are known.
+LEDGER_MIN_TRANSFER_MINOR = 100
+
+# FX rules.
+# A rate is considered fresh for this long. Requests within the window
+# are served from Firestore without hitting FxRatesAPI.
+RATE_CACHE_SECONDS = 300
+# After this long, even a cached rate is too old to trust. If the live
+# provider is unreachable past this point, the corridor raises
+# RATE_UNAVAILABLE rather than pricing a transfer on a stale value.
+RATE_STALE_HARD_LIMIT_SECONDS = 3600
+# How long a quoted rate is locked for the frontend between the quote
+# screen and the confirm screen.
 RATE_LOCK_SECONDS = 45
 
 # HTTP status codes used across the API.

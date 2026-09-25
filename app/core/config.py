@@ -98,6 +98,19 @@ class Settings(BaseSettings):
     cloudinary_api_secret: str | None = Field(default=None)
 
     # ------------------------------------------------------------------
+    # FxRatesAPI (live FX rates for African corridors)
+    #
+    # Used by the transfers service to price a cross-currency transfer.
+    # This is the only source of the rate — the ledger itself never
+    # calls out to an FX vendor. Whatever rate this API returns must be
+    # converted to a scaled integer (``rate_scaled``, rate ×
+    # ``LEDGER_RATE_SCALE``) before it's passed into a ``LedgerRequest``;
+    # the ledger is a pure-integer system and never accepts a float.
+    # ------------------------------------------------------------------
+    fxrates_api_key: str | None = Field(default=None)
+    fxrates_base_url: str = Field(default="https://api.fxratesapi.com")
+
+    # ------------------------------------------------------------------
     # Feature flags
     # ------------------------------------------------------------------
     demo_mode: bool = Field(default=True)
@@ -257,6 +270,29 @@ class Settings(BaseSettings):
             )
 
         return cloud_name, api_key, api_secret
+
+    def require_fxrates_config(self) -> tuple[str, str]:
+        """Return (base_url, api_key) for FxRatesAPI.
+
+        Raises RuntimeError with a clear message if any value is
+        missing so the app fails at startup, not on the first rate
+        lookup made mid-transfer.
+        """
+        base_url = self.fxrates_base_url
+        api_key = self.fxrates_api_key
+
+        if not base_url:
+            raise RuntimeError(
+                "FxRatesAPI is not fully configured. Missing environment "
+                "variable: FXRATES_BASE_URL"
+            )
+        if not api_key:
+            raise RuntimeError(
+                "FxRatesAPI is not fully configured. Missing environment "
+                "variable: FXRATES_API_KEY"
+            )
+
+        return base_url, api_key
 
 
 @lru_cache(maxsize=1)
