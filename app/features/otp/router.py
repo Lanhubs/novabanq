@@ -67,7 +67,7 @@ def _resolve_user_email(uid: str) -> str:
         "Enforces a resend cooldown to prevent abuse."
     ),
 )
-async def send_email_otp(
+def send_email_otp(
     uid: CurrentUid,
     _payload: SendEmailOtpRequest,
 ) -> dict[str, Any]:
@@ -92,7 +92,7 @@ async def send_email_otp(
         "consumed and cannot be reused."
     ),
 )
-async def verify_email_otp(
+def verify_email_otp(
     uid: CurrentUid,
     payload: VerifyEmailOtpRequest,
 ) -> dict[str, Any]:

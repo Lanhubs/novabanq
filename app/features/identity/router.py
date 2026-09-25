@@ -49,7 +49,7 @@ def _ok(data: Any) -> dict[str, Any]:
         "client sends the resulting public id to POST /identity/verify."
     ),
 )
-async def get_upload_signature(uid: CurrentUid) -> dict[str, Any]:
+def get_upload_signature(uid: CurrentUid) -> dict[str, Any]:
     payload = generate_upload_signature()
     return _ok(UploadSignatureResponse(**payload).model_dump())
 
@@ -66,7 +66,7 @@ async def get_upload_signature(uid: CurrentUid) -> dict[str, Any]:
         "verified, a user cannot re-run this endpoint."
     ),
 )
-async def verify_identity(
+def verify_identity(
     uid: CurrentUid,
     payload: VerifyIdentityRequest,
     background_tasks: BackgroundTasks,

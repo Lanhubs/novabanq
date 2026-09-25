@@ -90,7 +90,7 @@ def _to_response(profile: dict[str, Any]) -> dict[str, Any]:
         "not been verified."
     ),
 )
-async def create_profile(
+def create_profile(
     uid: CurrentUid,
     claims: CurrentClaims,
     payload: UserCreateRequest,
@@ -114,7 +114,7 @@ async def create_profile(
     summary="Return the authenticated user's profile",
     description="Returns the NovaBanq profile for the current user.",
 )
-async def get_profile(uid: CurrentUid) -> dict[str, Any]:
+def get_profile(uid: CurrentUid) -> dict[str, Any]:
     profile = service.get_profile(uid)
     return _ok(_to_response(profile))
 
@@ -129,7 +129,7 @@ async def get_profile(uid: CurrentUid) -> dict[str, Any]:
         "names must match the government ID."
     ),
 )
-async def update_names(
+def update_names(
     uid: CurrentUid,
     payload: UpdateNamesRequest,
 ) -> dict[str, Any]:
@@ -157,7 +157,7 @@ async def update_names(
         "should debounce calls while the user types."
     ),
 )
-async def check_tag(
+def check_tag(
     uid: CurrentUid,
     tag: Annotated[str, Query(
         min_length=3,
@@ -187,7 +187,7 @@ async def check_tag(
         "profile."
     ),
 )
-async def claim_tag(
+def claim_tag(
     uid: CurrentUid,
     payload: TagClaimRequest,
 ) -> dict[str, Any]:
@@ -210,7 +210,7 @@ async def claim_tag(
         "verification here."
     ),
 )
-async def verify_phone(
+def verify_phone(
     uid: CurrentUid,
     payload: VerifyPhoneRequest,
 ) -> dict[str, Any]:
@@ -237,7 +237,7 @@ async def verify_phone(
         "already set — use the forgot-PIN flow to reset first."
     ),
 )
-async def set_pin(
+def set_pin(
     uid: CurrentUid,
     payload: SetPinRequest,
 ) -> dict[str, Any]:
@@ -255,7 +255,7 @@ async def set_pin(
         "Returns 429 with a retry delay when locked."
     ),
 )
-async def verify_pin(
+def verify_pin(
     uid: CurrentUid,
     payload: VerifyPinRequest,
 ) -> dict[str, Any]:
@@ -275,7 +275,7 @@ async def verify_pin(
         "is cleared and the user may set a new PIN via POST /me/pin."
     ),
 )
-async def reset_pin(
+def reset_pin(
     uid: CurrentUid,
     claims: CurrentClaims,
 ) -> dict[str, Any]:
