@@ -13,12 +13,12 @@ valid Firebase ID token in hand.
 
 **How to use this document:** Sections 1–3 are reference material you
 set up once (base URL, the response envelope, how errors are shaped)
-and rarely revisit after that. Sections 4–6 walk through each endpoint
+and rarely revisit after that. Sections 4–7 walk through each endpoint
 the mobile client actually calls, in the order you'll build the screens
-that use them. Section 7 is the one to keep open while you build the
-send-money flow — it stitches sections 4–6 together into the real,
+that use them. Section 8 is the one to keep open while you build the
+send-money flow — it stitches sections 5–7 together into the real,
 moment-by-moment sequence, including the two behaviors that are easiest
-to get wrong (idempotency and quote expiry). Sections 8–9 are lookup
+to get wrong (idempotency and quote expiry). Sections 9–10 are lookup
 tables you'll come back to repeatedly rather than read start to finish:
 how to format money correctly, and what every error code means.
 
@@ -29,11 +29,11 @@ how to format money correctly, and what every error code means.
 Everything else in this document has been confirmed against the
 backend code. One thing is still genuinely open:
 
-**`XOF`'s display symbol** (Section 8) — shown here as `CFA`. This is
+**`XOF`'s display symbol** (Section 9) — shown here as `CFA`. This is
 a product decision, not a technical one: confirm with the design lead
 whether `CFA`, `F CFA`, `₣`, or something else is correct before
 shipping it. Whichever symbol you land on, put it behind a single
-`symbolFor(Currency)` function (see Section 8) rather than hardcoding
+`symbolFor(Currency)` function (see Section 9) rather than hardcoding
 it at each call site, so changing it later is a one-line fix instead
 of a find-and-replace across the app.
 
@@ -46,10 +46,11 @@ of a find-and-replace across the app.
 3. [Error Handling](#3-error-handling)
 4. [Accounts — Reading Balances](#4-accounts--reading-balances)
 5. [Transfers — Quote](#5-transfers--quote)
-6. [Transfers — Execute](#6-transfers--execute)
-7. [The Complete Transfer Flow](#7-the-complete-transfer-flow)
-8. [Formatting Amounts for Display](#8-formatting-amounts-for-display)
-9. [Error Code Reference](#9-error-code-reference)
+6. [Funding — Depositing Money](#6-funding--depositing-money)
+7. [Transfers — Execute](#7-transfers--execute)
+8. [The Complete Transfer Flow](#8-the-complete-transfer-flow)
+9. [Formatting Amounts for Display](#9-formatting-amounts-for-display)
+10. [Error Code Reference](#10-error-code-reference)
 
 ---
 
@@ -149,7 +150,7 @@ See the auth guide for token handling and the refresh-on-401 pattern.
 | 422 | Business rule violated, or validation failed | Show field errors or a specific message |
 | 429 | Rate-limited or locked (e.g. PIN lockout) | Show a wait message; back off |
 | 500 | Server error | Log the request id if present; retry once |
-| 502 | Upstream provider failed (FX, KYC, email) | Show "try again later" |
+| 502 | Upstream provider failed (FX, KYC, email, funding) | Show "try again later" |
 
 ### Validation errors (422)
 
@@ -213,14 +214,15 @@ Authorization: Bearer <token>
 | Field | Type | Notes |
 |---|---|---|
 | `currency` | string | One of `NGN`, `GHS`, `KES`, `XOF`, `ZAR`. Fixed at account creation; never changes. |
-| `balance_minor` | integer | Balance in **minor units** of the currency. Never a float. See [Formatting Amounts](#8-formatting-amounts-for-display). |
+| `balance_minor` | integer | Balance in **minor units** of the currency. Never a float. See [Formatting Amounts](#9-formatting-amounts-for-display). |
 | `balance_display` | string | Same amount as a decimal string with the currency's standard decimal places. **Display this directly** — do not reformat `balance_minor` yourself unless you need a different style. Format is a plain decimal string: no thousands separator, no currency symbol, no leading/trailing whitespace. For NGN, GHS, KES, and ZAR it has two decimal places; for XOF it has zero. If you want a currency symbol or thousands separators, add them at the widget layer — don't re-derive the number. |
 | `updated_at` | ISO 8601 timestamp | When the balance last changed. |
 
 **Pagination:** none — a user has one account.
 
-**Caching:** the balance changes when the user sends or receives money.
-Poll it after a successful transfer, or after a push notification fires.
+**Caching:** the balance changes when the user sends money, receives
+money, or funds their account. Poll it after a successful transfer,
+after a funding webhook fires, or after a push notification.
 
 ---
 
@@ -304,6 +306,7 @@ profile. A client cannot state its own currency.
 
 | Status | Code | Meaning |
 |---|---|---|
+| 404 | `USER_NOT_FOUND` | Profile missing — shouldn't happen for an authenticated request, but documented for completeness. |
 | 404 | `RECIPIENT_NOT_FOUND` | The tag resolves to no user. |
 | 422 | `SELF_TRANSFER` | Sender and recipient are the same user. |
 | 422 | `VALIDATION_ERROR` | Bad request body. See `details.fields`. |
@@ -313,7 +316,209 @@ profile. A client cannot state its own currency.
 
 ---
 
-## 6. Transfers — Execute
+## 6. Funding — Depositing Money
+
+Funding is how a user gets money **into** their NovaBanq account. In
+production, the user transfers money from their bank or mobile money
+app to a NovaBanq-issued virtual account number; the bank routes the
+payment through Flutterwave, Flutterwave sends a webhook to NovaBanq,
+and the ledger credits the user's balance automatically.
+
+**For the hackathon demo, the webhook is fired directly by a button in
+the app** instead of by Flutterwave — see "How the demo works" below.
+Everything else — the virtual account, the ledger credit, the balance
+update — is real.
+
+### The flow, from the user's perspective
+
+1. User taps "Add money" in the app.
+2. App calls `POST /funding/virtual-account` and receives the user's
+   account number, bank name, and currency.
+3. App displays the account number and bank name on screen.
+4. **In production:** user opens their bank app, enters the number,
+   and sends money. Bank → Flutterwave → webhook → ledger credits.
+   **In the demo:** the app fires `POST /webhooks/flutterwave` directly
+   with a payload that mimics Flutterwave's.
+5. App polls `GET /accounts/me` and shows the updated balance.
+
+### `POST /funding/virtual-account`
+
+Returns the user's virtual account. **Idempotent**: calling more than
+once for the same user returns the same account, never a second one.
+You call this every time the user opens the "Add money" screen; the
+backend reuses the existing account.
+
+**Request:**
+
+```
+POST /api/v1/funding/virtual-account
+Authorization: Bearer <token>
+```
+
+No request body.
+
+**Response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "account_number": "1546629060",
+    "bank_name": "NovaBanq GH",
+    "account_name": "David Chashama Mensah",
+    "currency": "GHS",
+    "country": "GH",
+    "provider_ref": "mock_cfc2fe49aed84907a6b9d1c91a256e58",
+    "created_at": "2026-09-26T16:53:45.746965Z"
+  },
+  "error": null
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `account_number` | string | The account number the user enters in their bank app. |
+| `bank_name` | string | The bank shown alongside the account number. |
+| `account_name` | string | Name on the account — the user's display name. |
+| `currency` | string | The currency the account accepts. Matches the user's own currency. |
+| `country` | string | The country the account is issued in. |
+| `provider_ref` | string | The provider's opaque reference for this account. **Save this** — you'll need it to fire the demo webhook. It's stable for a given user, so one call per app session is enough. |
+| `created_at` | ISO 8601 timestamp | When the virtual account was first created. |
+
+**Errors:**
+
+| Status | Code | Meaning |
+|---|---|---|
+| 401 | `AUTH_INVALID` | Token missing, expired, or malformed. |
+| 404 | `USER_NOT_FOUND` | User hasn't completed onboarding. |
+| 502 | `FUNDING_PROVIDER_UNAVAILABLE` | The virtual account provider can't issue an account. Raised by the real Flutterwave provider until it's implemented; not reachable while the mock provider is active. |
+| 502 | `INTERNAL_ERROR` | Firestore or ledger failure. |
+
+### `POST /webhooks/flutterwave`
+
+Receives a deposit notification. **This endpoint is not called by the
+mobile app in production** — it's called by Flutterwave. In the demo,
+the app calls it directly to simulate a deposit.
+
+**Request:**
+
+```
+POST /api/v1/webhooks/flutterwave
+Content-Type: application/json
+```
+
+**No `Authorization` header.** The endpoint is authenticated by the
+`verif-hash` header that Flutterwave sends, not by a Firebase token.
+
+**Request body:**
+
+```json
+{
+  "event": "charge.completed",
+  "data": {
+    "id": "test-event-001",
+    "tx_ref": "mock_cfc2fe49aed84907a6b9d1c91a256e58",
+    "amount": 250.00,
+    "currency": "GHS",
+    "status": "successful"
+  }
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `event` | string | yes | Only `"charge.completed"` is acted on. Any other value returns 200 with `credited: false`. |
+| `data.id` | string or number | yes | A unique identifier for this deposit event. **Must be unique per deposit** — the backend uses it as the idempotency key. If you fire two deposits with the same `id`, the second is a no-op. For the demo, generate a fresh value per tap: `"demo-${DateTime.now().millisecondsSinceEpoch}"`. |
+| `data.tx_ref` | string | yes | The `provider_ref` from the virtual account response. **Must match the user's current provider_ref** — a stale or unknown ref is rejected. |
+| `data.amount` | number | yes | Amount in major units (e.g. `250.00` for GHS 250). Sent as a JSON number; the backend parses it as an exact Decimal. |
+| `data.currency` | string | yes | Must match the virtual account's currency. A mismatch is rejected. |
+| `data.status` | string | yes | Only `"successful"` credits the ledger. Any other value returns 200 with `credited: false`. |
+| `data.customer` | object | no | Ignored by the backend; included for realism if you want. |
+
+**Response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "status": "ok",
+    "credited": true
+  },
+  "error": null
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `status` | string | Always `"ok"`. |
+| `credited` | boolean | `true` if the ledger was credited by this call. `false` if the event was a duplicate, was ignored (wrong event type or status), or was rejected as corrupt. **For the demo, this is the field to check** — if it's `true`, the balance went up. |
+
+**Errors:**
+
+| Status | Code | Meaning |
+|---|---|---|
+| 401 | `AUTH_INVALID` | `verif-hash` header missing or wrong. Only enforced when the real Flutterwave provider is active; skipped for the mock. |
+| 422 | `VALIDATION_ERROR` | Body doesn't match the expected shape. |
+
+**Note on HTTP status:** the webhook returns **200 for every well-formed
+event**, whether the deposit was credited, was a duplicate, or was
+rejected for a data-integrity reason (unknown ref, stale ref, currency
+mismatch). Only a signature failure returns 401. This is deliberate —
+Flutterwave retries non-2xx responses, and a corrupt payload will never
+become valid on retry. Rejected-but-well-formed events are logged at
+`CRITICAL` on the backend for monitoring.
+
+### How the demo works
+
+The demo app fires `POST /webhooks/flutterwave` directly. Here is the
+complete Dart flow for a "Simulate deposit" button:
+
+```dart
+Future<void> simulateDeposit({
+  required String providerRef,
+  required String currency,
+  required double amount,
+}) async {
+  // 1. Fire the webhook with a unique event id
+  final response = await ApiClient.post('/webhooks/flutterwave', {
+    'event': 'charge.completed',
+    'data': {
+      'id': 'demo-${DateTime.now().millisecondsSinceEpoch}',
+      'tx_ref': providerRef,
+      'amount': amount,
+      'currency': currency,
+      'status': 'successful',
+    },
+  });
+
+  // 2. Check whether the ledger actually credited
+  final credited = response['data']['credited'] as bool;
+  if (!credited) {
+    throw Exception('Deposit did not credit. Check the backend log.');
+  }
+
+  // 3. Refresh the balance
+  await _refreshBalance();  // calls GET /accounts/me
+}
+```
+
+**What to say to judges:**
+
+> "The user gets a virtual account number here. In production they'd
+> open their bank app, enter this number, and send money. The bank
+> routes it through Flutterwave, Flutterwave sends us a webhook, and
+> we credit the ledger. For the demo, this button fires the webhook
+> directly — so you can see the whole pipeline work end to end."
+
+**What not to claim:** that real money moved. Nothing in the demo
+touches a real bank. The virtual account number is generated by
+NovaBanq's own mock provider, not by Flutterwave. The Flutterwave
+account is created and the integration is stubbed, but the API calls
+are not wired in yet.
+
+---
+
+## 7. Transfers — Execute
 
 Execute settles the transfer through the ledger. **This is the endpoint
 that moves money.** It should only be called after the user confirms
@@ -427,12 +632,14 @@ schema's documented example; a UUIDv4 is equally valid.
 
 | Status | Code | Meaning | Retry with same key? |
 |---|---|---|---|
+| 404 | `USER_NOT_FOUND` | Sender's profile is missing. Shouldn't happen for an authenticated request. | No |
 | 404 | `RECIPIENT_NOT_FOUND` | Tag resolves to no user. | No — new key |
 | 409 | `DUPLICATE_TRANSFER` | Same idempotency key, already settled. | **Yes** — the original succeeded; fetch it by key if you have the result |
 | 422 | `PIN_INVALID` | Wrong PIN. Counts against the lockout. | No — new key |
 | 422 | `SELF_TRANSFER` | Sender is the recipient. | No |
 | 422 | `INSUFFICIENT_BALANCE` | Balance can't cover `total_debit_minor`. | No |
 | 422 | `AMOUNT_INVALID` | Amount below minimum or malformed. | No |
+| 422 | `CORRIDOR_UNSUPPORTED` | No FX corridor for the currency pair. Execute re-runs the same validation as quote, so this is reachable here too. | No |
 | 422 | `VALIDATION_ERROR` | Body validation failed. | No |
 | 429 | `PIN_LOCKED` | Too many wrong PINs. Wait 20 minutes. | No |
 | 500 | `INTERNAL_ERROR` | Server error. | **Yes** — same key |
@@ -458,7 +665,7 @@ will fail the same way unless you fix the request first.
 
 ---
 
-## 7. The Complete Transfer Flow
+## 8. The Complete Transfer Flow
 
 ```
  1. User opens the "Send" screen
@@ -511,7 +718,7 @@ duplicate-detection event.
 
 ---
 
-## 8. Formatting Amounts for Display
+## 9. Formatting Amounts for Display
 
 **All amounts in every API request and response are integers in the
 currency's minor units.** Never floats, never strings-as-numbers.
@@ -569,19 +776,21 @@ their mind about XOF, you change one line.
 
 ---
 
-## 9. Error Code Reference
+## 10. Error Code Reference
 
-Every code the transfers and accounts endpoints can return. Switch on
-these strings — never on HTTP status alone, and never on the message.
+Every code the transfers, funding, and accounts endpoints can return.
+Switch on these strings — never on HTTP status alone, and never on the
+message.
 
 ### Transfers
 
 Covers both `POST /transfers/quote` and `POST /transfers` — not every
-endpoint returns every code below; see Section 5 and Section 6 for which codes apply
+endpoint returns every code below; see Section 5 and Section 7 for which codes apply
 to which one.
 
 | Code | HTTP | Meaning | Suggested UX |
 |---|---|---|---|
+| `USER_NOT_FOUND` | 404 | Sender's profile is missing. Shouldn't happen for an authenticated request — documented for completeness. | Re-route to onboarding if this ever surfaces. |
 | `RECIPIENT_NOT_FOUND` | 404 | Tag resolves to no user | "No one found with that @tag. Check the spelling." |
 | `SELF_TRANSFER` | 422 | Sender is the recipient | "You can't send money to yourself." |
 | `AMOUNT_INVALID` | 422 | Amount below minimum or malformed | "Minimum transfer is 1.00." |
@@ -589,7 +798,7 @@ to which one.
 | `INSUFFICIENT_BALANCE` | 422 | Balance can't cover total debit | "You need X more to send this." |
 | `PIN_INVALID` | 422 | Wrong PIN (counts toward lockout) | "Incorrect PIN. N attempts remaining." |
 | `PIN_LOCKED` | 429 | Too many wrong attempts | "PIN locked. Try again in 20 minutes." |
-| `DUPLICATE_TRANSFER` | 409 | Key already used, original settled | Show the original receipt (see Section 7) |
+| `DUPLICATE_TRANSFER` | 409 | Key already used, original settled | Show the original receipt (see Section 8) |
 | `RATE_UNAVAILABLE` | 502 | FX provider unreachable, cache too stale | "Rate unavailable. Try again in a moment." (retry-able) |
 | `FX_PROVIDER_UNAVAILABLE` | 502 | FX provider rejected the request (auth/quota) | Same message to the user. Log it — the backend needs to see these. |
 | `VALIDATION_ERROR` | 422 | Request body invalid | Show `details.fields` inline |
@@ -603,6 +812,22 @@ to which one.
 > down; `FX_PROVIDER_UNAVAILABLE` usually means our API key was
 > rejected or the account hit a quota. A spike in the latter is a real
 > incident and the backend team needs to know.
+
+### Funding
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `USER_NOT_FOUND` | 404 | User hasn't completed onboarding; can't issue a virtual account. |
+| `AUTH_INVALID` | 401 | Webhook signature failed. Only reachable when the real Flutterwave provider is active. |
+| `FUNDING_PROVIDER_UNAVAILABLE` | 502 | Provider can't be reached or isn't implemented. |
+| `VALIDATION_ERROR` | 422 | Webhook body doesn't match the expected shape. |
+| `INTERNAL_ERROR` | 500/502 | Firestore or ledger failure. |
+
+> **Note on webhook "failures":** the webhook returns 200 for every
+> well-formed event, including ones that don't credit. If the deposit
+> didn't land, check `data.credited` in the response body, not the
+> HTTP status. Rejections (unknown ref, stale ref, currency mismatch)
+> are logged at `CRITICAL` on the backend.
 
 ### Accounts
 
@@ -658,14 +883,22 @@ For reference, every endpoint currently deployed. Endpoints marked
 | GET | `/api/v1/identity/upload-signature` | Get Cloudinary signature |
 | POST | `/api/v1/identity/verify` | Verify BVN + selfie |
 | GET | `/api/v1/accounts/me` | Read account balance |
+| POST | `/api/v1/funding/virtual-account` | Get or create virtual account |
+| POST | `/api/v1/webhooks/flutterwave` | Receive deposit webhook |
 | POST | `/api/v1/transfers/quote` | Price a transfer |
 | POST | `/api/v1/transfers` | Execute a transfer |
-| GET | `/api/v1/transfers/{transaction_id}` | Fetch a receipt **(planned)** |
-| GET | `/api/v1/transactions` | List transaction history **(planned)** |
-| POST | `/api/v1/funding/virtual-account` | Create virtual account for deposit **(planned)** |
+| GET | `/api/v1/transactions` | List transaction history |
+| GET | `/api/v1/transactions/{transaction_id}` | Fetch a single transaction |
+| GET | `/api/v1/transfers/{transaction_id}` | Fetch a receipt **(planned — use `/transactions/{id}` for now)** |
 | POST | `/api/v1/withdrawals` | Withdraw to bank/mobile money **(planned)** |
 
-That's 17 live endpoints and 4 planned ones.
+**That's 21 live endpoints and 2 planned ones.**
+
+Note: the transactions endpoints are live and can be used today —
+`GET /api/v1/transactions/{transaction_id}` returns the same receipt
+data that `GET /api/v1/transfers/{transaction_id}` was planned to
+return, and is scoped to the caller's participation. Use it for the
+receipt screen.
 
 ---
 
