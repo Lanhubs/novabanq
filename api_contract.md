@@ -24,40 +24,18 @@ how to format money correctly, and what every error code means.
 
 ---
 
-## ⚠️ Not Yet Confirmed — Read Before Building Against These
+## ⚠️ Not Yet Confirmed — Read Before Building Against This
 
-Everything else in this document comes straight from the backend code.
-These five specifics are best-effort and need a quick confirmation from
-the backend engineer before the frontend hard-codes anything around
-them:
+Everything else in this document has been confirmed against the
+backend code. One thing is still genuinely open:
 
-1. **`POST /users/me/pin/reset` error codes** (Section 9, *Auth-related*) —
-   `PIN_ALREADY_SET` and `PIN_INVALID` are confirmed for
-   `POST /users/me/pin` and `POST /users/me/pin/verify` respectively.
-   The **reset** endpoint's own error codes haven't been checked
-   against its actual implementation — treat them as a placeholder.
-2. **`balance_display`'s exact format** (Section 4, Section 8) — shown here as a
-   plain decimal string (`"57134.11"`): no thousands separator, no
-   currency symbol. If the real response includes either, both the
-   example in Section 4 and the "prefer `balance_display`" guidance in Section 8
-   need a small update.
-3. **`transaction_id` vs. `idempotency_key` formats** (Section 6) — the
-   examples use a UUIDv4 for `transaction_id` (confirmed — the ledger
-   generates it as `str(uuid.uuid4())`) and a ULID for
-   `idempotency_key` (taken from the request schema's example string,
-   not independently confirmed). These are deliberately different
-   fields for different purposes, but double-check whether the client
-   is free to generate the key in *either* format or whether one is
-   specifically required.
-4. **`XOF`'s display symbol** (Section 8) — shown as `CFA`. If the product
-   wants `F CFA`, `₣`, or something else instead, it's a one-line fix
-   — but it should be a single fixed mapping the whole app uses.
-5. **`RATE_UNAVAILABLE` vs. `FX_PROVIDER_UNAVAILABLE`** (Section 5, Section 6, Section 9) —
-   both currently map to 502 and are documented here as
-   interchangeable for UX purposes ("show a generic try-again message
-   for either"). If the product wants them to feel different to the
-   user — e.g. one is worth an automatic retry sooner than the other —
-   they should be split apart in this doc first.
+**`XOF`'s display symbol** (Section 8) — shown here as `CFA`. This is
+a product decision, not a technical one: confirm with the design lead
+whether `CFA`, `F CFA`, `₣`, or something else is correct before
+shipping it. Whichever symbol you land on, put it behind a single
+`symbolFor(Currency)` function (see Section 8) rather than hardcoding
+it at each call site, so changing it later is a one-line fix instead
+of a find-and-replace across the app.
 
 ---
 
@@ -236,7 +214,7 @@ Authorization: Bearer <token>
 |---|---|---|
 | `currency` | string | One of `NGN`, `GHS`, `KES`, `XOF`, `ZAR`. Fixed at account creation; never changes. |
 | `balance_minor` | integer | Balance in **minor units** of the currency. Never a float. See [Formatting Amounts](#8-formatting-amounts-for-display). |
-| `balance_display` | string | Same amount as a decimal string with the currency's standard decimal places. **Display this directly** — do not reformat `balance_minor` yourself unless you need a different style. Exact format not yet confirmed — see the callout above. |
+| `balance_display` | string | Same amount as a decimal string with the currency's standard decimal places. **Display this directly** — do not reformat `balance_minor` yourself unless you need a different style. Format is a plain decimal string: no thousands separator, no currency symbol, no leading/trailing whitespace. For NGN, GHS, KES, and ZAR it has two decimal places; for XOF it has zero. If you want a currency symbol or thousands separators, add them at the widget layer — don't re-derive the number. |
 | `updated_at` | ISO 8601 timestamp | When the balance last changed. |
 
 **Pagination:** none — a user has one account.
@@ -330,8 +308,8 @@ profile. A client cannot state its own currency.
 | 422 | `SELF_TRANSFER` | Sender and recipient are the same user. |
 | 422 | `VALIDATION_ERROR` | Bad request body. See `details.fields`. |
 | 422 | `CORRIDOR_UNSUPPORTED` | No FX corridor for the currency pair. |
-| 502 | `RATE_UNAVAILABLE` | FX provider down and cache too stale. |
-| 502 | `FX_PROVIDER_UNAVAILABLE` | FX provider rejected the request. |
+| 502 | `RATE_UNAVAILABLE` | Provider unreachable AND cache older than 1 hour. Transient — retry may succeed. |
+| 502 | `FX_PROVIDER_UNAVAILABLE` | Provider responded with an error (auth, quota, bad request). Retry will fail until fixed. |
 
 ---
 
@@ -397,6 +375,17 @@ Its job is to make the transfer **safe to retry**.
    killed mid-request and relaunched, you need to retry with the same
    key, not a new one.
 
+**Format:** the field is a plain string, 8–128 characters. The
+backend does not validate the format beyond that — it treats the key
+as an opaque token and uses it verbatim as a Firestore document id.
+UUIDv4 and ULID both work and are both good choices; ULID has the
+advantage of being sortable, which is occasionally useful when
+debugging logs. **Do not invent a custom format** (e.g. embedding the
+amount or recipient in the key) — a key derived from the request is
+the same key for two logically-different attempts, which defeats the
+purpose. The example in this doc uses a ULID because it's the
+schema's documented example; a UUIDv4 is equally valid.
+
 **Response (201):**
 
 ```json
@@ -429,7 +418,7 @@ Its job is to make the transfer **safe to retry**.
 
 | Field | Type | Notes |
 |---|---|---|
-| `transaction_id` | string | The ledger's transaction identifier (a UUIDv4). Use it to fetch the receipt later. Note this is a different ID format from `idempotency_key` — see the callout above. |
+| `transaction_id` | string | The ledger's transaction identifier (a UUIDv4), generated server-side. Use it to fetch the receipt later. This is intentionally a different ID than `idempotency_key` — you generate the key, the server generates the transaction id. |
 | `status` | string | Always `"SETTLED"`. There is no other value on a success response. |
 | `quote` | object | **The quote that was actually applied.** Re-read this on the receipt — it may differ from an earlier quote if the rate moved. Its own `expires_at` reflects when *this* recomputed quote expires, not when the transfer settled. |
 | `settled_at` | ISO 8601 timestamp | When the ledger committed. |
@@ -544,21 +533,39 @@ string from `balance_minor` (rare — the API already returns
 `Decimal` package. `balance_minor / 100.0` will produce
 `57134.10999999999` on some platforms.
 
-**Prefer `balance_display` from the API.** It's a pre-formatted string
-with the correct number of decimal places for the currency. Only
-reformat if you need a different style (thousands separators, symbol
-placement). Its exact format isn't independently confirmed yet — see
-the callout above.
+**Prefer `balance_display` from the API.** It's a pre-formatted
+decimal string with the correct number of decimal places for the
+currency — no thousands separators, no currency symbol. If you want
+either, add them at the widget layer on top of `balance_display`:
 
-**Currency symbols for display:**
+```dart
+final display = '₦${account.balanceDisplay}';     // ₦57134.11
+final grouped = addThousandsSeparators(display);  // ₦57,134.11
+```
 
-| Currency | Symbol |
-|---|---|
-| NGN | ₦ |
-| GHS | GH₵ |
-| KES | KSh |
-| XOF | CFA *(placeholder — confirm final symbol, see callout above)* |
-| ZAR | R |
+Do not re-derive the number from `balance_minor` unless you have a
+specific reason to. The API's string is authoritative, and re-deriving
+risks float rounding on platforms where `double` can't represent the
+value exactly.
+
+**Currency symbols for display:** these are product decisions and may
+differ from what's shown here. Confirm with the design lead before
+hardcoding them in the app. The API does not return a symbol — only
+the three-letter ISO code in `currency` — so symbol mapping is
+entirely the client's responsibility.
+
+| Currency | Suggested symbol | Notes |
+|---|---|---|
+| NGN | ₦ | |
+| GHS | GH₵ | |
+| KES | KSh | |
+| XOF | CFA | West African CFA franc. If the product uses a different convention (F CFA, ₣), use that instead — and use it consistently across every screen. |
+| ZAR | R | |
+
+**Recommendation:** put this mapping in one Dart file
+(`currency_symbols.dart`) with a single `symbolFor(Currency)` function,
+and never hardcode a symbol at a call site. When the product changes
+their mind about XOF, you change one line.
 
 ---
 
@@ -583,10 +590,19 @@ to which one.
 | `PIN_INVALID` | 422 | Wrong PIN (counts toward lockout) | "Incorrect PIN. N attempts remaining." |
 | `PIN_LOCKED` | 429 | Too many wrong attempts | "PIN locked. Try again in 20 minutes." |
 | `DUPLICATE_TRANSFER` | 409 | Key already used, original settled | Show the original receipt (see Section 7) |
-| `RATE_UNAVAILABLE` | 502 | FX provider down, cache too stale | "Rate unavailable. Try again in a moment." |
-| `FX_PROVIDER_UNAVAILABLE` | 502 | FX provider rejected the request | Same as above — see the callout above if these should ever differ |
+| `RATE_UNAVAILABLE` | 502 | FX provider unreachable, cache too stale | "Rate unavailable. Try again in a moment." (retry-able) |
+| `FX_PROVIDER_UNAVAILABLE` | 502 | FX provider rejected the request (auth/quota) | Same message to the user. Log it — the backend needs to see these. |
 | `VALIDATION_ERROR` | 422 | Request body invalid | Show `details.fields` inline |
 | `INTERNAL_ERROR` | 500/502 | Server or ledger error | Retry with the same idempotency key |
+
+> **`RATE_UNAVAILABLE` vs `FX_PROVIDER_UNAVAILABLE`:** both map to 502
+> and both should show the user the same "try again" message — the
+> distinction is diagnostic, not user-facing. But **log the exact code
+> when you see one**, because they point at different underlying
+> problems: `RATE_UNAVAILABLE` usually means the provider is briefly
+> down; `FX_PROVIDER_UNAVAILABLE` usually means our API key was
+> rejected or the account hit a quota. A spike in the latter is a real
+> incident and the backend team needs to know.
 
 ### Accounts
 
@@ -604,14 +620,19 @@ to which one.
 | `EMAIL_NOT_VERIFIED` | 403 | User hasn't completed email OTP |
 | `USER_ALREADY_EXISTS` | 409 | Profile already created for this uid |
 | `TAG_TAKEN` | 409 | The requested @tag is claimed |
-| `PIN_ALREADY_SET` | 409 | PIN already set; use reset flow |
-| `PIN_INVALID` | 422 | Wrong PIN (see transfers) |
-| `PIN_LOCKED` | 429 | Locked (see transfers) |
+| `PIN_ALREADY_SET` | 409 | PIN already set — returned by `POST /users/me/pin` |
+| `PIN_INVALID` | 422 | Wrong PIN — returned by `POST /users/me/pin/verify` and by transfer execute |
+| `PIN_LOCKED` | 429 | Locked — returned by `POST /users/me/pin/verify` and by transfer execute |
+| `PHONE_MISMATCH` | 422 | Returned by `POST /users/me/pin/reset` when the token's phone claim is missing or doesn't match the stored phone |
 
-`PIN_ALREADY_SET` and `PIN_INVALID` above are confirmed for
-`POST /users/me/pin` and `POST /users/me/pin/verify`. The codes
-`POST /users/me/pin/reset` itself returns haven't been checked — see
-the callout above.
+> **Note on `POST /users/me/pin/reset`:** this endpoint's error
+> surface is narrower than the PIN set/verify endpoints. Its only
+> documented failure mode is `PHONE_MISMATCH` (the endpoint requires
+> a phone-verified token and compares the token's `phone_number`
+> claim against the profile's stored phone). It does **not** return
+> `PIN_ALREADY_SET`, `PIN_INVALID`, or `PIN_LOCKED` — it clears the
+> PIN unconditionally once the phone check passes. Verify against the
+> implementation before relying on this in the client.
 
 ---
 
