@@ -36,3 +36,28 @@ def reserve(tag: str, uid: str) -> None:
     """
     if not repository.reserve_atomic(tag, uid):
         raise TagTakenError()
+
+
+def resolve_uid(tag: str) -> str | None:
+    """Return the uid that owns the tag, or None if unclaimed.
+
+    Used by the transfers service to turn a recipient's tag into the
+    uid whose account should be credited. A thin pass-through to the
+    repository — there is no business logic to apply here, and the
+    ``None`` return is meaningful to the caller (it means "no such
+    recipient"), so it is not converted into an exception at this
+    layer.
+
+    Args:
+        tag: The normalized tag (lowercase, no leading '@').
+
+    Returns:
+        The owning Firebase uid, or ``None`` if the tag has never been
+        reserved.
+
+    Raises:
+        TagRepositoryError: On any Firestore read failure — propagated
+            from the repository so callers can distinguish "recipient
+            does not exist" from "we could not check right now".
+    """
+    return repository.get_uid_for_tag(tag)

@@ -29,7 +29,12 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.core.constants import TRANSFER_MIN_AMOUNT_MINOR, Country, Currency
+from app.core.constants import (
+    PIN_LENGTH,
+    TRANSFER_MIN_AMOUNT_MINOR,
+    Country,
+    Currency,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -104,9 +109,10 @@ class QuoteRequest(BaseModel):
 class TransferRequest(BaseModel):
     """Payload for executing a transfer.
 
-    This mirrors ``QuoteRequest`` and adds an idempotency key. The
-    client should generate the key once per transfer attempt and reuse
-    it on retries; a retry with the same key returns the original
+    This mirrors ``QuoteRequest`` and adds the two fields that only
+    make sense on execute: the idempotency key and the sender's PIN.
+    The client should generate the key once per transfer attempt and
+    reuse it on retries; a retry with the same key returns the original
     result rather than moving money twice.
     """
 
@@ -141,11 +147,29 @@ class TransferRequest(BaseModel):
         ),
         examples=["01HZX8V5K2N3P4Q5R6S7T8U9V0"],
     )
+    pin: str = Field(
+        ...,
+        min_length=PIN_LENGTH,
+        max_length=PIN_LENGTH,
+        description=(
+            f"{PIN_LENGTH}-digit transaction PIN the sender set during "
+            "onboarding. Verified against the stored bcrypt hash; "
+            "enforces the same lockout policy as POST /users/me/pin/verify."
+        ),
+        examples=["48392"],
+    )
 
     @field_validator("recipient_tag")
     @classmethod
     def _validate_tag(cls, value: str) -> str:
         return _normalize_tag(value)
+
+    @field_validator("pin")
+    @classmethod
+    def _validate_pin(cls, value: str) -> str:
+        if not value.isdigit():
+            raise ValueError("PIN must contain only digits.")
+        return value
 
 
 # ---------------------------------------------------------------------------

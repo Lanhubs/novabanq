@@ -13,10 +13,8 @@ Two entry points:
       ever wants live validation.
 
     * ``validate_execute(...)`` — calls ``validate_quote`` first, then
-      adds the checks that only make sense when actually moving money:
-      the sender has sufficient balance. This is the only place those
-      checks live — ``validate_execute`` does not duplicate the
-      quote-time checks, it runs them.
+      adds the check that only makes sense when actually moving money:
+      the sender has sufficient balance.
 
 Both functions raise typed ``NovaBanqError`` subclasses so the global
 exception handler serializes them with the correct ``error.code`` and
@@ -24,9 +22,16 @@ exception handler serializes them with the correct ``error.code`` and
 codebase.
 
 Every function is pure — no Firestore, no HTTP. The caller passes in
-already-loaded profiles, accounts, and corridor configuration. This
-keeps the validator testable without mocks and keeps the service layer
-in charge of what gets loaded.
+already-loaded profiles and balances. This keeps the validator
+testable without mocks and keeps the service layer in charge of what
+gets loaded.
+
+Corridor support is NOT checked here. The transfers service calls
+``currency_service.get_rate`` while computing the fee breakdown, and
+that function raises ``CorridorUnsupportedError`` when the pair has no
+corridor. Pre-checking in the validator would mean loading the full
+corridor list into memory on every request — more I/O for the same
+outcome the rate lookup already produces.
 """
 
 import logging
@@ -89,19 +94,6 @@ class AmountBelowMinimumError(NovaBanqError):
     message = "The amount is below the minimum for a transfer."
 
 
-class CorridorUnsupportedError(NovaBanqError):
-    """Raised when the corridor between two currencies is not configured.
-
-    Renamed from the currency module's identically-coded error so the
-    transfers boundary can present it with context ("from GHS to NGN")
-    without depending on the currency module's exact error class.
-    """
-
-    status_code = 422
-    code = ErrorCode.CORRIDOR_UNSUPPORTED
-    message = "This currency corridor is not currently supported."
-
-
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -112,14 +104,15 @@ def validate_quote(
     recipient_profile: dict[str, Any],
     send_amount_minor: int,
     recipient_tag: str,
-    supported_corridors: frozenset[tuple[Currency, Currency]],
 ) -> None:
     """Validate a quote request before the fee calculation runs.
 
     Checks that don't depend on the sender's balance or on the
     recipient's account existing. A quote is a read — no money moves,
-    so we don't need to verify the sender can afford it yet (though the
-    frontend will usually show "insufficient balance" if they can't).
+    so we don't need to verify the sender can afford it yet.
+
+    Corridor support is deliberately not checked here — see the module
+    docstring.
 
     Args:
         sender_profile: The authenticated sender's loaded profile.
@@ -128,22 +121,11 @@ def validate_quote(
         send_amount_minor: The amount the sender entered, in the
             sender's minor units.
         recipient_tag: The normalized recipient tag, for log context.
-        supported_corridors: The set of ``(from_currency, to_currency)``
-            pairs the platform currently supports, loaded by the caller
-            from the corridors collection. Same-currency pairs never
-            need to appear here — a transfer within one currency is
-            never treated as an unsupported corridor.
 
     Raises:
         SelfTransferError: If sender and recipient are the same user.
         AmountBelowMinimumError: If the amount is below the platform
             minimum.
-        CorridorUnsupportedError: If the sender and recipient have
-            different currencies and that pair isn't in
-            ``supported_corridors``. (The currency service would also
-            catch this when it tries to fetch the rate — checking here
-            means the error names the corridor, not just "rate
-            unavailable".)
     """
     _check_not_self_transfer(sender_profile, recipient_profile)
 
@@ -151,18 +133,6 @@ def validate_quote(
         raise AmountBelowMinimumError(
             f"Amount must be at least {TRANSFER_MIN_AMOUNT_MINOR} minor "
             f"units, got {send_amount_minor}."
-        )
-
-    sender_currency, recipient_currency = _resolve_corridor(
-        sender_profile, recipient_profile
-    )
-    if (
-        sender_currency != recipient_currency
-        and (sender_currency, recipient_currency) not in supported_corridors
-    ):
-        raise CorridorUnsupportedError(
-            f"No corridor configured from {sender_currency.value} to "
-            f"{recipient_currency.value}."
         )
 
     # Log context — the tag is the sender's view of the recipient, not
@@ -182,14 +152,12 @@ def validate_execute(
     sender_balance_minor: int,
     send_amount_minor: int,
     total_debit_minor: int,
-    recipient_tag: str,
-    supported_corridors: frozenset[tuple[Currency, Currency]],
 ) -> None:
     """Validate an execute request before the ledger is called.
 
-    Runs ``validate_quote`` first, then adds the checks that only
-    matter when money is about to move. A transfer that fails here
-    never opens a Firestore transaction.
+    Runs ``validate_quote``'s checks first, then adds the balance
+    check, which only matters when money is about to move. A transfer
+    that fails here never opens a Firestore transaction.
 
     Args:
         sender_profile: The authenticated sender's loaded profile.
@@ -203,14 +171,11 @@ def validate_execute(
         total_debit_minor: The send amount plus the fee, in the
             sender's minor units. This is what actually leaves the
             sender's balance.
-        recipient_tag: The normalized recipient tag, for log context.
-        supported_corridors: See ``validate_quote``.
 
     Raises:
         SelfTransferError: If sender and recipient are the same user.
         AmountBelowMinimumError: If the amount is below the platform
             minimum.
-        CorridorUnsupportedError: If the currency pair isn't supported.
         InsufficientBalanceError: If the sender's balance cannot cover
             ``total_debit_minor``.
     """
@@ -218,8 +183,7 @@ def validate_execute(
         sender_profile=sender_profile,
         recipient_profile=recipient_profile,
         send_amount_minor=send_amount_minor,
-        recipient_tag=recipient_tag,
-        supported_corridors=supported_corridors,
+        recipient_tag=recipient_profile.get("tag", ""),
     )
 
     if sender_balance_minor < total_debit_minor:
@@ -266,29 +230,3 @@ def _check_not_self_transfer(
 
     if sender_uid == recipient_uid:
         raise SelfTransferError()
-
-
-def _resolve_corridor(
-    sender_profile: dict[str, Any],
-    recipient_profile: dict[str, Any],
-) -> tuple[Currency, Currency]:
-    """Return (sender_currency, recipient_currency).
-
-    Mirrors ``_check_not_self_transfer``'s defensive posture: a profile
-    reaching this validator without a currency set is a caller bug, not
-    a user error, so this fails loudly rather than silently treating a
-    missing currency as "no corridor issue".
-
-    Raises:
-        ValueError: If either profile has no currency set.
-    """
-    sender_currency = sender_profile.get("currency")
-    recipient_currency = recipient_profile.get("currency")
-
-    if sender_currency is None or recipient_currency is None:
-        raise ValueError(
-            "Both sender and recipient profiles must have a currency "
-            "set before validation."
-        )
-
-    return sender_currency, recipient_currency

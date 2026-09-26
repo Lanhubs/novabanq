@@ -30,9 +30,10 @@ from dotenv import load_dotenv
 
 from app.core.constants import (
     COUNTRY_TAG_SUFFIX,
+    TAG_SUFFIX_SEPARATOR,
+    Country,
     FirestoreCollection,
     OtpPurpose,
-    TAG_SUFFIX_SEPARATOR,
 )
 from app.infra.firestore import document
 
@@ -59,8 +60,13 @@ WRONG_PIN = "11111"
 TEST_FIRST_NAME = "David"
 TEST_MIDDLE_NAME = "Chukwuemeka"
 TEST_LAST_NAME = "Okafor"
-TEST_COUNTRY = "NG"
 TEST_PHONE = "+2348012345678"
+
+# Typed as the enum member, not a raw string, so that the dict lookups
+# below type-check. ``Country`` is a ``StrEnum``, so the value still
+# serializes to ``"NG"`` when sent over HTTP — the change is purely a
+# static-typing improvement, not a wire change.
+TEST_COUNTRY: Country = Country.NIGERIA
 
 # Suffix the backend will append to any base tag for TEST_COUNTRY.
 TEST_TAG_SUFFIX = COUNTRY_TAG_SUFFIX[TEST_COUNTRY]
@@ -175,12 +181,19 @@ def _otp_hash_length(uid: str) -> int:
 
 
 def _profile_payload() -> dict:
-    """Return the canonical profile creation payload."""
+    """Return the canonical profile creation payload.
+
+    ``country`` is emitted as ``str(TEST_COUNTRY)`` so the JSON body
+    carries the wire value (``"NG"``) rather than an enum repr. Because
+    ``Country`` is a ``StrEnum`` this would serialize correctly either
+    way, but the explicit cast documents the intent and keeps the
+    payload a plain-JSON object, not one carrying an enum member.
+    """
     return {
         "first_name": TEST_FIRST_NAME,
         "middle_name": TEST_MIDDLE_NAME,
         "last_name": TEST_LAST_NAME,
-        "country": TEST_COUNTRY,
+        "country": str(TEST_COUNTRY),
         "phone": TEST_PHONE,
     }
 
@@ -209,7 +222,7 @@ def test_profile_creation_requires_names(
     response = client.post(
         "/users/me",
         headers=auth_headers,
-        json={"country": TEST_COUNTRY, "phone": TEST_PHONE},
+        json={"country": str(TEST_COUNTRY), "phone": TEST_PHONE},
     )
     assert response.status_code == 422, response.text
     body = response.json()

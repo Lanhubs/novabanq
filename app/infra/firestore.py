@@ -9,6 +9,7 @@ import logging
 from collections.abc import Callable
 from typing import Any, TypeVar
 
+from google.cloud import firestore
 from google.cloud.firestore import Client as FirestoreClient
 from google.cloud.firestore import Transaction
 from google.cloud.firestore_v1.base_query import FieldFilter
@@ -36,10 +37,12 @@ def run_atomic(operation: Callable[[Transaction], T]) -> T:
     the callable are serialized against concurrent transactions on the
     same documents. If the callable raises, all writes roll back.
 
-    Note:
-        ``run_transaction`` exists on the Firestore client at runtime but
-        is not declared in the library's published type stubs. The scoped
-        type ignore below is intentional and reflects that known gap.
+    The Google Cloud Firestore Python SDK exposes transactions via the
+    ``@firestore.transactional`` decorator applied to a callable that
+    takes a ``Transaction`` as its first argument. There is no
+    ``client.run_transaction(callable)`` method in the public SDK; the
+    transaction object is created with ``client.transaction()`` and
+    passed to the wrapped callable.
 
     Args:
         operation: A callable that receives an active ``Transaction``
@@ -50,7 +53,12 @@ def run_atomic(operation: Callable[[Transaction], T]) -> T:
         Whatever the callable returns.
     """
     client = get_db()
-    return client.run_transaction(operation)  # type: ignore[attr-defined]
+
+    @firestore.transactional
+    def _run(transaction: Transaction) -> T:
+        return operation(transaction)
+
+    return _run(client.transaction())
 
 
 def collection(name: str):

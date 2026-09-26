@@ -15,15 +15,9 @@ Design decisions:
     * Every numeric field is an integer. The FX rate is stored as
       ``rate_scaled`` (rate × ``LEDGER_RATE_SCALE``), never as a float.
       The ledger is a pure-integer system.
-    * ``LedgerRequest.__post_init__`` validates three things before the
-      request can be used:
-
-          1. Structure — non-empty ids, instruction count within the
-             configured cap.
-          2. Metadata — the keys required for the transaction type are
-             present, including the uid fields.
-          3. Balance — debits equal credits per currency.
-
+    * ``LedgerRequest.__post_init__`` validates the per-currency
+      balancing invariant. An unbalanced request never reaches
+      Firestore.
     * Amount validation here is purely structural — every amount must
       be a positive integer. Business policy like minimum transfer
       size is deliberately NOT enforced in this module: the ledger
@@ -38,22 +32,6 @@ Design decisions:
       Firestore has its raw string fields coerced to enum members by
       the repository before construction. Invalid values raise
       ``ValueError`` at that boundary.
-    * ``from_currency``/``from_amount_minor`` and ``to_currency``/
-      ``to_amount_minor`` are nullable as a pair on
-      ``TransactionDocument``. FUNDING has no "from" side and
-      WITHDRAWAL has no "to" side — that side's external leg is
-      outside the ledger. Each pair is present together or absent
-      together; an amount without a currency, or the reverse, is
-      never valid.
-    * Counterparty identity can be snapshotted, not just referenced.
-      ``sender_snapshot`` and ``recipient_snapshot`` freeze a user's
-      tag and display name as they were at the moment a transaction
-      settled, so a later rename or retag never rewrites how a past
-      transaction is displayed. A snapshot is optional enrichment: a
-      transaction is fully valid with a uid and no snapshot (the
-      frontend falls back to a live profile lookup), but a snapshot
-      can never exist without its uid. Avatar is deliberately
-      excluded — see ``_SNAPSHOT_KEYS``.
 """
 
 import copy
@@ -73,59 +51,6 @@ from app.core.constants import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Metadata contract
-# ---------------------------------------------------------------------------
-
-# The keys each transaction type must carry in ``LedgerRequest.metadata``.
-# The ledger does not know what a "transfer" means semantically — it only
-# knows which keys each type promises to carry, the same way it knows
-# instructions must balance per currency.
-#
-# ``rate_scaled`` is deliberately NOT listed here. It is conditionally
-# required (only when from_currency != to_currency), so the repository
-# validates its presence after reading the two currency fields.
-#
-# ``sender_snapshot`` / ``recipient_snapshot`` are deliberately NOT
-# listed here. They are optional enrichment on ``TransactionDocument``,
-# not part of the ledger's required-keys contract — a caller that
-# can't produce a snapshot (a failed profile read, a not-yet-updated
-# caller) should still be able to move money.
-_REQUIRED_METADATA_KEYS: dict[TransactionType, frozenset[str]] = {
-    TransactionType.TRANSFER: frozenset({
-        "sender_uid",
-        "recipient_uid",
-        "from_currency",
-        "to_currency",
-        "from_amount_minor",
-        "to_amount_minor",
-        "fee_minor",
-    }),
-    TransactionType.FUNDING: frozenset({
-        "recipient_uid",
-        "to_currency",
-        "to_amount_minor",
-        "fee_minor",
-    }),
-    TransactionType.WITHDRAWAL: frozenset({
-        "sender_uid",
-        "from_currency",
-        "from_amount_minor",
-        "fee_minor",
-    }),
-    TransactionType.REVERSAL: frozenset({
-        "sender_uid",
-        "recipient_uid",
-        "from_currency",
-        "to_currency",
-        "from_amount_minor",
-        "to_amount_minor",
-        "fee_minor",
-        "original_transaction_id",
-    }),
-}
 
 
 # ---------------------------------------------------------------------------
@@ -184,22 +109,17 @@ class LedgerInstruction:
         # than inside a Firestore transaction.
         if self.account_type is AccountType.SYSTEM:
             try:
-                _, encoded_currency = parse_system_account_id(self.account_id)
+                parse_system_account_id(self.account_id)
             except ValueError as exc:
                 raise ValueError(
                     f"Invalid SYSTEM account_id {self.account_id!r}: {exc}"
                 ) from exc
-
-            # The id encodes its currency ("fx_GHS" -> GHS). If the
-            # instruction declares a different currency, the mismatch
-            # would corrupt the per-currency balancing check in
-            # LedgerRequest without ever raising.
-            if encoded_currency is not self.currency:
-                raise ValueError(
-                    f"SYSTEM account_id {self.account_id!r} encodes "
-                    f"currency {encoded_currency.value}, but the "
-                    f"instruction declares {self.currency.value}."
-                )
+            # TODO: if parse_system_account_id exposes the currency
+            # encoded in the id (e.g. "fx_GHS" -> GHS), cross-check it
+            # against self.currency here. As written, nothing stops an
+            # instruction from declaring a currency that disagrees with
+            # its own account id, which would corrupt the per-currency
+            # balancing check below without ever raising.
 
 
 @dataclass(frozen=True)
@@ -214,11 +134,11 @@ class LedgerRequest:
         transaction_type: TRANSFER, FUNDING, WITHDRAWAL, or REVERSAL.
         instructions: The debit/credit instructions. Must balance per
             currency — see ``__post_init__``.
-        metadata: Operation-specific context. Must carry the keys
-            required by ``transaction_type`` — see
-            ``_REQUIRED_METADATA_KEYS``. Deep-copied on construction so
-            the caller cannot mutate the request after it is built —
-            including nested values, not just top-level keys.
+        metadata: Operation-specific context (sender uid, recipient
+            uid, corridor, ``rate_scaled``, …). Deep-copied on
+            construction so the caller cannot mutate the request after
+            it is built — including nested values, not just top-level
+            keys. The repository further copies it before writing.
     """
 
     transaction_id: str
@@ -247,35 +167,7 @@ class LedgerRequest:
         # dict or list) with the caller's original object.
         object.__setattr__(self, "metadata", copy.deepcopy(self.metadata))
 
-        self._verify_metadata()
         self._verify_balanced()
-
-    def _verify_metadata(self) -> None:
-        """Every required metadata key for this transaction type must be present.
-
-        The ledger stays generic — it does not know what a TRANSFER
-        means. But it does know which keys each transaction type
-        promises to carry, and checking presence here means a
-        caller-bug (missing ``sender_uid``, wrong key name) fails at
-        construction rather than producing a corrupted
-        ``TransactionDocument`` inside a Firestore commit.
-        """
-        required = _REQUIRED_METADATA_KEYS.get(self.transaction_type)
-        if required is None:
-            # Should be unreachable — TransactionType is a closed enum
-            # and _REQUIRED_METADATA_KEYS covers every member.
-            raise ValueError(
-                f"No metadata contract defined for transaction type "
-                f"{self.transaction_type.value!r}."
-            )
-
-        missing = required - self.metadata.keys()
-        if missing:
-            raise ValueError(
-                f"metadata is missing required keys for "
-                f"{self.transaction_type.value}: "
-                f"{', '.join(sorted(missing))}."
-            )
 
     def _verify_balanced(self) -> None:
         """Every currency's debits must equal its credits.
@@ -331,63 +223,6 @@ class LedgerEntry:
     created_at: datetime
 
 
-# The keys a counterparty snapshot dict must carry. A snapshot freezes
-# the counterparty's tag and display name as they were at the moment
-# the transaction settled, so a later rename or retag never rewrites
-# how a past transaction is displayed. ``avatar_url`` is deliberately
-# excluded: a photo isn't a financial fact the way a name is, it's
-# decoration that should always reflect who the user is *today* — a
-# frontend that wants an avatar next to a transaction fetches the
-# current profile for that specific counterparty. ``uid`` is also
-# excluded: it's already available as ``sender_uid`` / ``recipient_uid``
-# on the transaction document, so repeating it here would just be a
-# second source of truth for the same value.
-_SNAPSHOT_KEYS: frozenset[str] = frozenset({"tag", "name"})
-
-
-def _validate_snapshot(
-    snapshot: dict[str, str] | None, label: str
-) -> None:
-    """Validate one counterparty snapshot dict, if present.
-
-    A snapshot is optional enrichment — see
-    ``TransactionDocument._verify_snapshots`` for when one is allowed
-    to be absent. This helper only checks the shape of a snapshot
-    that is actually present.
-
-    Args:
-        snapshot: The snapshot dict, or None.
-        label: Which field this is, for error messages
-            ("sender_snapshot" or "recipient_snapshot").
-
-    Raises:
-        TypeError: snapshot is not a dict.
-        ValueError: snapshot's keys don't exactly match
-            ``_SNAPSHOT_KEYS``, or tag/name is missing or empty.
-    """
-    if snapshot is None:
-        return
-
-    if not isinstance(snapshot, dict):
-        raise TypeError(
-            f"{label} must be a dict or None, got "
-            f"{type(snapshot).__name__}."
-        )
-
-    missing = _SNAPSHOT_KEYS - snapshot.keys()
-    extra = snapshot.keys() - _SNAPSHOT_KEYS
-    if missing or extra:
-        raise ValueError(
-            f"{label} must have exactly the keys {sorted(_SNAPSHOT_KEYS)}; "
-            f"missing={sorted(missing)}, unexpected={sorted(extra)}."
-        )
-
-    for key in ("tag", "name"):
-        value = snapshot[key]
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError(f"{label}[{key!r}] must be a non-empty string.")
-
-
 @dataclass(frozen=True)
 class TransactionDocument:
     """One row of the ``transactions`` collection.
@@ -409,21 +244,30 @@ class TransactionDocument:
     would also mean making ``settled_at`` optional again and revisiting
     "write-once."
 
-    A separate ``failed_transfer_attempts`` collection, written by the
-    transfers service on rejection, is the intended path for that
-    audit trail if it is ever needed.
+    ``from_currency``/``from_amount_minor`` and
+    ``to_currency``/``to_amount_minor`` are each independently
+    optional, because not every ``transaction_type`` has both sides: a
+    FUNDING transaction has no ledger-internal source (money enters
+    from outside the ledger), and a WITHDRAWAL has no ledger-internal
+    destination (money leaves to outside the ledger). A TRANSFER is
+    expected to populate both.
 
-    ``sender_snapshot`` and ``recipient_snapshot`` each hold
-    ``{"tag", "name"}`` for that side, frozen at the moment of
-    settlement — see the module docstring. Either may be None: a
-    snapshot is optional enrichment, not a requirement of a valid
-    transaction. The one constraint enforced here is that a snapshot
-    can never exist without its uid — see ``_verify_snapshots``.
+    This dataclass deliberately does NOT enforce which combination of
+    ``sender_uid`` / ``recipient_uid`` / ``from_*`` / ``to_*`` is
+    required for each ``transaction_type`` (e.g. "FUNDING must set
+    ``recipient_uid`` and ``to_*``, and leave ``sender_uid``/``from_*``
+    None"). That mapping is real business logic that hasn't been
+    pinned down for every type — REVERSAL in particular is ambiguous
+    (does it carry both sides, or mirror only the side it reverses?).
+    Encoding a guess here risks rejecting a legitimate document because
+    the guess was wrong. Add that validation once the per-type shape is
+    confirmed.
 
-    ``from_currency``/``from_amount_minor`` and ``to_currency``/
-    ``to_amount_minor`` are each nullable as a pair: FUNDING has no
-    "from" side, WITHDRAWAL has no "to" side, and both are present
-    for TRANSFER and REVERSAL. See ``_verify_amounts_and_currencies``.
+    ``sender_snapshot``/``recipient_snapshot`` carry a small,
+    denormalized copy of the counterparty's tag and display name at the
+    time of the transaction, so a transaction-history view can render
+    "You sent 58,250 NGN to david323.ng" without a second read of a
+    profile whose tag or name may have changed since.
     """
 
     transaction_id: str
@@ -458,77 +302,29 @@ class TransactionDocument:
                 f"settled_at must be None when status is {self.status.value}."
             )
 
-        self._verify_amounts_and_currencies()
-        self._verify_snapshots()
-
-    def _verify_amounts_and_currencies(self) -> None:
-        """Validate the from/to currency-and-amount pair on each side.
-
-        FUNDING has no "from" side and WITHDRAWAL has no "to" side —
-        that side's external leg is outside the ledger, so its
-        currency and amount are both None. Unlike a snapshot, an
-        amount is never valid without its currency: this pairing is
-        the financial fact the document records, not an enrichment,
-        so both directions of it are enforced.
-        """
-        if (self.from_amount_minor is None) != (self.from_currency is None):
-            raise ValueError(
-                "from_amount_minor and from_currency must be both "
-                "present or both None."
-            )
-        if (self.to_amount_minor is None) != (self.to_currency is None):
-            raise ValueError(
-                "to_amount_minor and to_currency must be both present "
-                "or both None."
-            )
-
         if self.from_amount_minor is not None and self.from_amount_minor <= 0:
-            raise ValueError(
-                "from_amount_minor must be greater than zero when present."
-            )
+            raise ValueError("from_amount_minor must be greater than zero.")
         if self.to_amount_minor is not None and self.to_amount_minor <= 0:
-            raise ValueError(
-                "to_amount_minor must be greater than zero when present."
-            )
+            raise ValueError("to_amount_minor must be greater than zero.")
         if self.fee_minor < 0:
             raise ValueError("fee_minor cannot be negative.")
 
-        cross_currency = (
-            self.from_currency is not None
-            and self.to_currency is not None
-            and self.from_currency != self.to_currency
-        )
-        if cross_currency and self.rate_scaled is None:
-            raise ValueError(
-                "rate_scaled is required for a cross-currency transaction."
-            )
-        if not cross_currency and self.rate_scaled is not None:
-            raise ValueError(
-                "rate_scaled must be None unless from_currency and "
-                "to_currency are both present and differ."
-            )
-
-    def _verify_snapshots(self) -> None:
-        """Each snapshot must be well-formed, and can't exist without its uid.
-
-        Snapshots are optional enrichment: a uid with no snapshot is a
-        valid, if less informative, transaction record — the frontend
-        falls back to showing the uid or fetching the profile on
-        demand. The reverse is never valid: a snapshot with no owning
-        uid can't correspond to any account and is always a caller
-        bug, so that one direction is still enforced.
-        """
-        _validate_snapshot(self.sender_snapshot, "sender_snapshot")
-        _validate_snapshot(self.recipient_snapshot, "recipient_snapshot")
-
-        if self.sender_snapshot is not None and self.sender_uid is None:
-            raise ValueError(
-                "sender_snapshot is present but sender_uid is None."
-            )
-        if self.recipient_snapshot is not None and self.recipient_uid is None:
-            raise ValueError(
-                "recipient_snapshot is present but recipient_uid is None."
-            )
+        # The cross-currency / rate_scaled relationship only makes
+        # sense when both sides are present — FUNDING and WITHDRAWAL
+        # have no FX conversion happening inside the ledger at all, so
+        # this check is skipped whenever either side is absent.
+        if self.from_currency is not None and self.to_currency is not None:
+            cross_currency = self.from_currency != self.to_currency
+            if cross_currency and self.rate_scaled is None:
+                raise ValueError(
+                    "rate_scaled is required for a cross-currency "
+                    "transaction."
+                )
+            if not cross_currency and self.rate_scaled is not None:
+                raise ValueError(
+                    "rate_scaled must be None when from_currency equals "
+                    "to_currency."
+                )
 
 
 # ---------------------------------------------------------------------------
