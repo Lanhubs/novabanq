@@ -111,6 +111,25 @@ class Settings(BaseSettings):
     fxrates_base_url: str = Field(default="https://api.fxratesapi.com")
 
     # ------------------------------------------------------------------
+    # Flutterwave (funding provider)
+    #
+    # Only the webhook verification hash is stored here. The virtual
+    # account integration itself is not implemented yet — see
+    # app/infra/virtual_accounts/flutterwave.py — but the webhook
+    # endpoint verifies this hash unconditionally whenever the real
+    # provider is active, so the setting must exist for the check to
+    # be able to run.
+    #
+    # Read from the Flutterwave dashboard → Settings → Webhooks →
+    # Secret hash. Empty by default. The webhook endpoint refuses to
+    # skip verification just because this value is absent: if the real
+    # provider is active and this hash is unset, the webhook returns
+    # 401 rather than accepting an unverifiable payload. See
+    # app/features/funding/router.py.
+    # ------------------------------------------------------------------
+    flutterwave_secret_hash: str = Field(default="")
+
+    # ------------------------------------------------------------------
     # Feature flags
     # ------------------------------------------------------------------
     demo_mode: bool = Field(default=True)
