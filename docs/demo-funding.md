@@ -519,4 +519,4 @@ For the developer who needs to trace the flow end to end:
 | `app/infra/virtual_accounts/flutterwave.py` | The real provider (stub) |
 | `app/infra/virtual_accounts/__init__.py` | The factory that picks which provider is active |
 | `scripts/test_funding.py` | The smoke test |
-| `docs/api-contract.md` | The full endpoint reference |
+| `docs/api-contract.md` | The full endpoint reference | 
