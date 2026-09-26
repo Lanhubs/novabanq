@@ -78,8 +78,17 @@ def document(collection_name: str, document_id: str):
 def where(field: str, operator: str, value: Any) -> FieldFilter:
     """Build a typed ``FieldFilter`` for queries.
 
-    Firestore deprecated positional ``where(field, op, value)`` calls in
-    favor of ``FieldFilter``. Wrapping it here keeps repositories free of
-    the imported Firestore types.
+    Firestore's ``Query.where()`` accepts three forms: a positional
+    ``(field, op, value)`` triple (deprecated), a ``FieldFilter``
+    positional argument, or a ``filter=FieldFilter(...)`` keyword
+    argument. Repositories in this codebase call this helper and pass
+    the result to ``Query.where(...)``. That works with a
+    ``FieldFilter`` instance, but the SDK emits a deprecation warning
+    when it detects the older positional-style call path during query
+    construction.
+
+    Returning the ``FieldFilter`` itself — rather than a positional
+    triple — avoids the warning on every query. The keyword form of
+    construction here also matches the SDK's own recommended pattern.
     """
     return FieldFilter(field, operator, value)
