@@ -42,6 +42,7 @@ from app.core.constants import (
 from app.core.exceptions import NovaBanqError
 from app.features.accounts import service as accounts_service
 from app.features.currency import service as currency_service
+from app.features.notifications import service as notifications_service
 from app.features.tags import service as tags_service
 from app.features.transfers import (
     executor,
@@ -234,7 +235,16 @@ def execute(
         recipient_tag=recipient_tag,
     )
 
-    users_service.verify_pin_for_uid(sender_uid, pin)
+    # Wrap the PIN verification so a lockout triggers the security
+    # notification before the exception propagates. The notification
+    # call itself cannot raise — see notifications.service — so the
+    # original PinLockedError is guaranteed to reach the router
+    # unchanged, even if Brevo is down.
+    try:
+        users_service.verify_pin_for_uid(sender_uid, pin)
+    except users_service.PinLockedError:
+        notifications_service.send_pin_lockout(profile=sender_profile)
+        raise
 
     from_currency = Currency(sender_profile["currency"])
     to_currency = Currency(recipient_profile["currency"])
@@ -273,6 +283,28 @@ def execute(
         to_amount_minor=breakdown.receive_amount_minor,
         fee_minor=breakdown.fee_minor,
         rate_scaled=_rate_scaled(quantized_rate),
+    )
+
+    # Notify both parties. Each call swallows its own delivery errors
+    # — a Brevo outage must never turn a settled transfer into a
+    # failed request. See notifications.service for the guarantee.
+    notifications_service.send_transfer_sent(
+        sender_profile=sender_profile,
+        recipient_display_name=_display_name(recipient_profile),
+        recipient_tag=recipient_tag,
+        send_amount_minor=breakdown.send_amount_minor,
+        fee_minor=breakdown.fee_minor,
+        total_debit_minor=breakdown.total_debit_minor,
+        sender_currency=from_currency,
+        transaction_id=result.transaction_id,
+    )
+    notifications_service.send_transfer_received(
+        recipient_profile=recipient_profile,
+        sender_display_name=_display_name(sender_profile),
+        sender_tag=_sender_tag(sender_profile),
+        receive_amount_minor=breakdown.receive_amount_minor,
+        recipient_currency=to_currency,
+        transaction_id=result.transaction_id,
     )
 
     quote_response = QuoteResponse(

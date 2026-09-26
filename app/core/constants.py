@@ -35,6 +35,21 @@ CURRENCY_MINOR_UNITS: dict[Currency, int] = {
 }
 
 
+# Display symbol per currency. Used by ``format_amount`` to render
+# human-readable amounts in emails and receipts. The trailing space is
+# meaningful — XOF and ZAR take one between the symbol and the number,
+# NGN, GHS, and KES do not. XOF has no minor unit (see
+# CURRENCY_MINOR_UNITS above), so its amounts render with no decimal
+# places.
+CURRENCY_DISPLAY_SYMBOL: dict[Currency, str] = {
+    Currency.NGN: "₦",
+    Currency.GHS: "GH₵",
+    Currency.KES: "KSh",
+    Currency.XOF: "CFA ",
+    Currency.ZAR: "R ",
+}
+
+
 # Country → ISO numeric prefix used in NovaBanq account numbers.
 ACCOUNT_NUMBER_COUNTRY_PREFIX: dict[Country, str] = {
     Country.NIGERIA: "01",

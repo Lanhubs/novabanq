@@ -36,6 +36,7 @@ from app.core.exceptions import (
 )
 from app.core.security import hash_pin, verify_pin
 from app.features.account_numbers.service import generate_and_reserve
+from app.features.notifications import service as notifications_service
 from app.features.otp import service as otp_service
 from app.features.tags import service as tags_service
 from app.features.users import repository
@@ -243,6 +244,14 @@ def create_profile(
         country,
         email_verified,
     )
+
+    # Welcome email. Best-effort: the notification service swallows its
+    # own delivery failures, so a Brevo outage cannot turn a successful
+    # profile creation into an error response. Fires once per user —
+    # the second POST /users/me returns 409 from the
+    # repository.exists(uid) check above and never reaches this line.
+    notifications_service.send_welcome(profile=profile)
+
     return profile
 
 
