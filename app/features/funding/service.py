@@ -10,7 +10,7 @@ Two entry points:
       the same uid returns the same account unchanged.
     * ``handle_webhook(payload)`` — process a provider webhook that a
       deposit has arrived. Credits the ledger atomically and
-      idempotently.
+      idempotently, then notifies the user by email.
 
 Both delegate the actual money movement to the ledger. This service
 never writes ``balance_minor``.
@@ -57,6 +57,7 @@ from app.features.ledger.schemas import (
     LedgerInstruction,
     LedgerRequest,
 )
+from app.features.notifications import service as notifications_service
 from app.features.users import service as users_service
 from app.infra.virtual_accounts import get_virtual_account_provider
 from app.infra.virtual_accounts.base import VirtualAccount
@@ -252,6 +253,20 @@ def handle_webhook(payload: WebhookPayload) -> WebhookAck:
         provider_ref,
         payload.data.id,
     )
+
+    # Notify the user. The notification service swallows its own
+    # delivery failures, so a Brevo outage cannot turn a successful
+    # credit into an error response. Fires only on the fresh-credit
+    # path — a replayed webhook returns above before reaching here,
+    # so the user gets exactly one email per deposit.
+    profile = users_service.get_profile(uid)
+    notifications_service.send_funding_received(
+        profile=profile,
+        amount_minor=amount_minor,
+        currency=record_currency,
+        transaction_id=result.transaction_id,
+    )
+
     return WebhookAck(status="ok", credited=True)
 
 

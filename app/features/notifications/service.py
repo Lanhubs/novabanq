@@ -1,6 +1,6 @@
 """Notification service.
 
-Sends transactional emails triggered by user actions. Five public
+Sends transactional emails triggered by user actions. Six public
 functions, one per notification type. Each one:
 
     1. Reads the recipient's email from their profile.
@@ -27,6 +27,7 @@ from typing import Any
 from app.core.constants import PIN_LOCKOUT_MINUTES, Currency
 from app.infra.email.client import EmailDeliveryError, send_email
 from app.infra.email.templates import (
+    render_funding_received_email,
     render_pin_lockout_email,
     render_transfer_received_email,
     render_transfer_sent_email,
@@ -217,6 +218,48 @@ def send_pin_lockout(*, profile: dict[str, Any]) -> None:
         to_name=_display_name_of(profile),
         content=content,
         event="pin-lockout",
+    )
+
+
+def send_funding_received(
+    *,
+    profile: dict[str, Any],
+    amount_minor: int,
+    currency: Currency,
+    transaction_id: str,
+) -> None:
+    """Notify the user that a deposit credited their balance.
+
+    Fires from the funding webhook after the ledger commits a FUNDING
+    transaction. Best-effort, like every other sender in this module
+    — a delivery failure is logged and swallowed so it cannot turn a
+    successful credit into an error response.
+
+    Called only on the fresh-credit path in ``handle_webhook``; a
+    replayed webhook returns before reaching the notification call,
+    so a replayed delivery does not generate a second email.
+
+    Args:
+        profile: The recipient user's profile.
+        amount_minor: Amount credited, in minor units.
+        currency: The currency the deposit arrived in.
+        transaction_id: Ledger transaction identifier.
+    """
+    to_email = _email_of(profile)
+    if to_email is None:
+        return
+
+    content = render_funding_received_email(
+        first_name=_first_name_of(profile),
+        amount_minor=amount_minor,
+        currency=currency,
+        transaction_id=transaction_id,
+    )
+    _deliver(
+        to_email=to_email,
+        to_name=_display_name_of(profile),
+        content=content,
+        event="funding-received",
     )
 
 

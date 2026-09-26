@@ -12,6 +12,7 @@ Run:
 """
 
 import os
+import time
 
 import httpx
 from dotenv import load_dotenv
@@ -49,6 +50,19 @@ def _print(label: str, response: httpx.Response) -> dict:
     return body
 
 
+def _unique_event_id(prefix: str = "test-event") -> str:
+    """Return a fresh event id for this run.
+
+    The ledger's idempotency check treats the event id as the key, so
+    a fixed id means only the first run of this script ever credits —
+    every subsequent run is a correctly-detected duplicate. Using a
+    timestamp-based suffix gives the fresh-deposit step a genuinely
+    new event each run, while the replay step reuses the exact same
+    id so the duplicate path is still exercised.
+    """
+    return f"{prefix}-{int(time.time() * 1000)}"
+
+
 def main() -> None:
     web_api_key = os.environ.get("FIREBASE_WEB_API_KEY")
     if not web_api_key:
@@ -65,11 +79,13 @@ def main() -> None:
         va = body["data"]
         provider_ref = va["provider_ref"]
 
-        # 2. Fire a webhook for that account, simulating a deposit
+        # 2. Fire a webhook for that account, simulating a deposit.
+        #    The event id is fresh this run so the ledger treats it as
+        #    a new deposit, not a replay of an earlier test.
         webhook_payload = {
             "event": "charge.completed",
             "data": {
-                "id": "test-event-001",
+                "id": _unique_event_id(),
                 "tx_ref": provider_ref,
                 "amount": 250.00,
                 "currency": va["currency"],
@@ -79,19 +95,23 @@ def main() -> None:
         r = c.post("/webhooks/flutterwave", json=webhook_payload)
         _print("Webhook (fresh deposit)", r)
 
-        # 3. Fire the same webhook again — should be a no-op
+        # 3. Fire the same webhook again — same event id, so the
+        #    ledger's idempotency check rejects it and no second
+        #    credit moves. Expect credited=False.
         r = c.post("/webhooks/flutterwave", json=webhook_payload)
         _print("Webhook (replay, expect credited=False)", r)
 
-        # 4. Check the balance
+        # 4. Check the balance. It should be higher by exactly
+        #    250.00 in major units (25000 minor) than before the run.
         r = c.get("/accounts/me", headers=headers)
         _print("Balance after funding", r)
 
-        # 5. Unknown ref — expect 200, credited=False
+        # 5. Unknown ref — expect 200, credited=False, and a
+        #    CRITICAL log line in the backend.
         bad_payload = {
             "event": "charge.completed",
             "data": {
-                "id": "test-event-002",
+                "id": _unique_event_id("test-event-bad"),
                 "tx_ref": "mock_does_not_exist",
                 "amount": 100.00,
                 "currency": va["currency"],
