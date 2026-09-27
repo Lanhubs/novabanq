@@ -1,6 +1,6 @@
 """AI intent HTTP endpoints.
 
-Two endpoints:
+Three endpoints:
 
     * ``POST /ai/parse-transfer`` — parse only. Takes a user's text,
       returns the structured intent plus the transfer quote. Read-only;
@@ -12,11 +12,17 @@ Two endpoints:
       or creates a scheduled one. Returns a discriminated union so the
       frontend knows which happened without an extra round trip.
 
-Both endpoints are authenticated via Firebase ID token, the same as
-every other user-facing endpoint. The sender's uid is needed because
-the amount parsed from the user's text is in their currency, and the
-timezone is theirs, so both must be read from their profile before the
-parsing can be validated.
+    * ``POST /ai/ask`` — the financial assistant. Takes a
+      plain-language question and returns an answer grounded in the
+      caller's own data: balance, transaction history, spending
+      summaries, counterparty details, advice, or a general money
+      question answered from the model's own knowledge.
+
+All three endpoints are authenticated via Firebase ID token, the same
+as every other user-facing endpoint. The sender's uid is needed
+because the amount parsed from the user's text is in their currency,
+the timezone is theirs, and the data behind Nova's answers is scoped
+to them.
 
 The combined endpoint's request carries the PIN. It does not carry
 the PIN through Gemini — the PIN is passed as a separate field on the
@@ -24,6 +30,11 @@ request and never enters the prompt or the model call. The service
 verifies it against the sender's stored hash through the same
 ``users_service.verify_pin_for_uid`` path every other money-movement
 endpoint uses.
+
+The ask endpoint's request carries no PIN — it is a read-only
+assistant. The caller can ask about their balance, their history, or
+a money concept without authenticating anything beyond the request's
+Firebase token.
 
 Status code on ``execute-transfer``:
     Returns **201 Created**, matching this codebase's convention for
@@ -50,7 +61,11 @@ from typing import Any
 from fastapi import APIRouter
 
 from app.core.security import CurrentUid
-from app.features.ai_intent import service
+from app.features.ai_intent import ask_service, service
+from app.features.ai_intent.ask_schemas import (
+    AskRequest,
+    AskResponse,
+)
 from app.features.ai_intent.execute_schemas import (
     ExecuteTransferPayload,
     ExecuteTransferRequest,
@@ -182,5 +197,72 @@ def execute_transfer(
         text=payload.text,
         pin=payload.pin,
         confirmed_recipient_uid=payload.confirmed_recipient_uid,
+    )
+    return _ok(result.model_dump(mode="json"))
+
+
+@router.post(
+    "/ai/ask",
+    response_model=dict[str, Any],
+    summary="Ask Nova a question about your money",
+    description=(
+        "The AI financial assistant. Takes a plain-language question "
+        "and returns an answer grounded in the caller's own data — "
+        "their balance, transaction history, spending, or a general "
+        "money question.\n\n"
+        "**What Nova can answer:**\n\n"
+        "  - Greetings — 'hi', 'how are you', 'what can you do'\n"
+        "  - Balance — 'what's my balance', 'how much do I have'\n"
+        "  - Last recipient — 'who did I send money to last'\n"
+        "  - Spending summaries — 'how much did I spend last month'\n"
+        "  - Counterparty details — 'tell me about Chidera', 'when "
+        "    did I last pay David'\n"
+        "  - Spending advice — 'am I spending too much this month'\n"
+        "  - General money questions — 'how can I save more', "
+        "    'explain compound interest'\n\n"
+        "**Response shape.** The response's `data.kind` field is the "
+        "classification of the question, one of the eight ask kinds. "
+        "The `data.answer` field is Nova's natural-language reply, "
+        "ready to display as-is. The `data.data` field carries the "
+        "structured numbers behind the answer, if any were needed; "
+        "it's null for greetings and general questions.\n\n"
+        "**Fail-soft.** An unrecognized question becomes kind "
+        "`UNKNOWN` with a helpful fallback reply, never a 500. Only "
+        "a genuinely unreachable Gemini, or a Firestore failure on a "
+        "data-backed kind, returns an error."
+    ),
+)
+def ask(
+    uid: CurrentUid,
+    payload: AskRequest,
+) -> dict[str, Any]:
+    """Answer a question about the caller's money.
+
+    Args:
+        uid: The authenticated caller's uid, injected from their
+            verified Firebase ID token. All data the answer is
+            grounded in is scoped to this uid — Nova never sees
+            another user's transactions.
+        payload: The parsed and validated request body. Contains the
+            caller's question, validated for length.
+
+    Returns:
+        The standard envelope whose ``data`` is a serialized
+        ``AskResponse`` — the classified kind, the answer text, and
+        the structured data behind the answer (or None for kinds that
+        fetch nothing).
+
+    Raises:
+        UserNotFoundError: If the caller has no profile.
+        AskProviderUnavailableError: If Gemini is unreachable for
+            classification, or for an answer that needed the model.
+        AccountUnavailableError: On a Firestore failure reading the
+            account, when the question was about the balance.
+        TransactionRepositoryError: On a Firestore failure reading
+            transactions, when the question was about history.
+    """
+    result: AskResponse = ask_service.answer_question(
+        sender_uid=uid,
+        question=payload.question,
     )
     return _ok(result.model_dump(mode="json"))
