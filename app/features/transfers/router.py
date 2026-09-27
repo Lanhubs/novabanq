@@ -2,8 +2,9 @@
 
 This module is the HTTP boundary for the transfers feature. It is
 deliberately thin: every handler parses an authenticated request,
-delegates all decision-making to ``app.features.transfers.service``,
-and wraps the result in the platform's standard response envelope.
+delegates all decision-making to ``app.features.transfers.service``
+or ``app.features.transfers.scheduled_service``, and wraps the result
+in the platform's standard response envelope.
 
 Nothing in this file touches Firestore, the ledger, the FX provider,
 or any business rule. If you find yourself wanting to add logic here,
@@ -36,9 +37,14 @@ Architecture notes that apply to every handler below:
 
       {"success": true, "data": {...}, "error": null}
 
-  Pydantic response models are serialized with ``model_dump()`` before
-  being handed to ``_ok``, so the envelope's ``data`` field always
-  contains a plain JSON-serializable dict — never a model instance.
+  Pydantic response models are serialized with
+  ``model_dump(mode="json")`` before being handed to ``_ok``, so the
+  envelope's ``data`` field always contains a plain
+  JSON-serializable dict — never a model instance. JSON mode matters:
+  the default python mode leaves nested ``Decimal`` values as live
+  objects in the returned dict, and FastAPI's generic encoder
+  downgrades those to ``float``, silently reintroducing the binary
+  imprecision every money path in this codebase avoids.
 
 * Errors propagate, they are not caught.
   Every error the service can raise is a ``NovaBanqError`` subclass
@@ -48,6 +54,16 @@ Architecture notes that apply to every handler below:
   would duplicate that logic in every router for no benefit, and would
   risk each router translating errors slightly differently. The rule
   is simple: routers do not try/except on ``NovaBanqError``.
+
+Route ordering note:
+    ``/scheduled`` and ``""`` are both flat, non-parameterized paths,
+    so their registration order has no effect on FastAPI's matching —
+    neither can shadow the other. The scheduled routes are grouped
+    after the immediate-transfer routes for readability, not for
+    correctness. If a parameterized path like ``/{transaction_id}``
+    is ever added under this prefix, it must be registered *after*
+    ``/scheduled`` to avoid the parameterized matcher swallowing
+    ``POST /transfers/scheduled`` first.
 """
 
 from typing import Any
@@ -55,7 +71,12 @@ from typing import Any
 from fastapi import APIRouter
 
 from app.core.security import CurrentUid
-from app.features.transfers import service
+from app.features.transfers import scheduled_service, service
+from app.features.transfers.scheduled_schemas import (
+    ScheduleTransferRequest,
+    ScheduledTransferListResponse,
+    ScheduledTransferResponse,
+)
 from app.features.transfers.schemas import (
     QuoteRequest,
     QuoteResponse,
@@ -78,20 +99,22 @@ def _ok(data: Any) -> dict[str, Any]:
     from a shared module. The function is four lines; a shared import
     would couple every router to a common utility module for no real
     gain, and would obscure at each call site exactly what shape is
-    being returned. The envelope contract itself is documented in the
-    handoff document and enforced at the type level by every handler's
-    return annotation.
+    being returned.
 
     Args:
         data: The serialized payload — always the result of calling
-            ``.model_dump()`` on a Pydantic response model, or a plain
-            dict for endpoints that have no dedicated model.
+            ``.model_dump(mode="json")`` on a Pydantic response model,
+            or a plain dict for endpoints that have no dedicated model.
 
     Returns:
         The envelope dict ready for FastAPI to serialize as JSON.
     """
     return {"success": True, "data": data, "error": None}
 
+
+# ---------------------------------------------------------------------------
+# Immediate transfers
+# ---------------------------------------------------------------------------
 
 @router.post(
     "/quote",
@@ -159,7 +182,7 @@ def quote(
         recipient_tag=payload.recipient_tag,
         send_amount_minor=payload.amount_minor,
     )
-    return _ok(result.model_dump())
+    return _ok(result.model_dump(mode="json"))
 
 
 @router.post(
@@ -256,4 +279,186 @@ def execute(
         idempotency_key=payload.idempotency_key,
         pin=payload.pin,
     )
-    return _ok(result.model_dump())
+    return _ok(result.model_dump(mode="json"))
+
+
+# ---------------------------------------------------------------------------
+# Scheduled transfers
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/scheduled",
+    response_model=dict[str, Any],
+    status_code=201,
+    summary="Schedule a transfer for a future time",
+    description=(
+        "Creates a scheduled transfer. The PIN is verified now, at "
+        "scheduling time, and the transfer is written as ``PENDING``. "
+        "A background scheduler fires it at ``execute_at``; when it "
+        "fires, the underlying transfer executes through the same "
+        "ledger path as an immediate transfer.\n\n"
+        "**Idempotency.** The client must generate a unique "
+        "``idempotency_key`` per scheduling attempt and reuse it "
+        "verbatim on retries. A second request bearing a key that has "
+        "already been used returns the original schedule without "
+        "consuming another PIN attempt.\n\n"
+        "**PIN.** The ``pin`` field is verified against the sender's "
+        "stored hash. It is *not* re-verified when the transfer fires — "
+        "the schedule itself is the authorization.\n\n"
+        "**Timing.** ``execute_at`` must be in the future (enforced by "
+        "the request schema). The scheduler fires the transfer within "
+        "a short window after that time; transfers whose window has "
+        "passed are marked ``FAILED`` with reason "
+        "``SCHEDULED_TRANSFER_EXPIRED`` rather than fired late."
+    ),
+)
+def schedule_transfer(
+    uid: CurrentUid,
+    payload: ScheduleTransferRequest,
+) -> dict[str, Any]:
+    """Create a scheduled transfer.
+
+    Args:
+        uid: The authenticated caller's uid.
+        payload: The parsed and validated request body. ``recipient_tag``
+            has been normalized, ``amount_minor`` confirmed above the
+            platform minimum, ``pin`` confirmed to be 5 digits, and
+            ``execute_at`` confirmed to be a future UTC timestamp — all
+            at the schema layer.
+
+    Returns:
+        The standard envelope whose ``data`` is a serialized
+        ``ScheduledTransferResponse`` with status ``PENDING``.
+
+    Raises:
+        UserNotFoundError: If the sender has no profile.
+        RecipientNotFoundError: If the recipient tag resolves to no
+            user.
+        SelfTransferError: If sender and recipient are the same user.
+        AmountBelowMinimumError: If the amount is below the minimum.
+        CorridorUnsupportedError: If the currency pair has no corridor.
+        PinInvalidError: If the PIN does not match the stored hash.
+        PinLockedError: If PIN entry is currently locked out.
+        ScheduledTransferRepositoryError: On a Firestore failure.
+    """
+    result: ScheduledTransferResponse = scheduled_service.schedule(
+        sender_uid=uid,
+        recipient_tag=payload.recipient_tag,
+        amount_minor=payload.amount_minor,
+        idempotency_key=payload.idempotency_key,
+        pin=payload.pin,
+        execute_at=payload.execute_at,
+    )
+    return _ok(result.model_dump(mode="json"))
+
+
+@router.get(
+    "/scheduled",
+    response_model=dict[str, Any],
+    summary="List the caller's scheduled transfers",
+    description=(
+        "Returns the caller's scheduled transfers, newest first. "
+        "Includes past ones — filter on ``status`` client-side to show "
+        "only ``PENDING`` on an 'upcoming transfers' screen."
+    ),
+)
+def list_scheduled_transfers(
+    uid: CurrentUid,
+) -> dict[str, Any]:
+    """Return the caller's scheduled transfers.
+
+    Args:
+        uid: The authenticated caller's uid.
+
+    Returns:
+        The standard envelope whose ``data`` is a serialized
+        ``ScheduledTransferListResponse``.
+
+    Raises:
+        ScheduledTransferRepositoryError: On a Firestore failure.
+    """
+    result: ScheduledTransferListResponse = scheduled_service.list_for_user(
+        uid=uid,
+    )
+    return _ok(result.model_dump(mode="json"))
+
+
+@router.get(
+    "/scheduled/{scheduled_transfer_id}",
+    response_model=dict[str, Any],
+    summary="Fetch a single scheduled transfer",
+    description=(
+        "Returns a single scheduled transfer the caller created. A "
+        "caller who is not the owner gets a 404, same as if the id "
+        "didn't exist."
+    ),
+)
+def get_scheduled_transfer(
+    uid: CurrentUid,
+    scheduled_transfer_id: str,
+) -> dict[str, Any]:
+    """Return a single scheduled transfer owned by the caller.
+
+    Args:
+        uid: The authenticated caller's uid.
+        scheduled_transfer_id: The scheduled transfer to fetch.
+
+    Returns:
+        The standard envelope whose ``data`` is a serialized
+        ``ScheduledTransferResponse``.
+
+    Raises:
+        ScheduledTransferNotFoundError: If the id is unknown, or the
+            caller is not its owner.
+        ScheduledTransferRepositoryError: On a Firestore failure.
+    """
+    result: ScheduledTransferResponse = scheduled_service.get_one(
+        uid=uid,
+        scheduled_transfer_id=scheduled_transfer_id,
+    )
+    return _ok(result.model_dump(mode="json"))
+
+
+@router.post(
+    "/scheduled/{scheduled_transfer_id}/cancel",
+    response_model=dict[str, Any],
+    summary="Cancel a pending scheduled transfer",
+    description=(
+        "Cancels a scheduled transfer that has not yet fired. Only "
+        "``PENDING`` transfers can be cancelled — attempting to cancel "
+        "one that has already settled, failed, or been cancelled "
+        "returns a 409.\n\n"
+        "If the scheduler fires the transfer at the same moment the "
+        "user cancels, whichever operation reaches the Firestore "
+        "transaction first wins. The loser sees a deterministic "
+        "outcome: either the cancel succeeds and the fire is recorded "
+        "as an anomaly, or the fire succeeds and the cancel returns "
+        "409."
+    ),
+)
+def cancel_scheduled_transfer(
+    uid: CurrentUid,
+    scheduled_transfer_id: str,
+) -> dict[str, Any]:
+    """Cancel a pending scheduled transfer.
+
+    Args:
+        uid: The authenticated caller's uid.
+        scheduled_transfer_id: The scheduled transfer to cancel.
+
+    Returns:
+        The standard envelope whose ``data`` is a serialized
+        ``ScheduledTransferResponse`` with status ``CANCELLED``.
+
+    Raises:
+        ScheduledTransferNotFoundError: If the id is unknown, or the
+            caller is not its owner.
+        ScheduledTransferStateError: If the transfer is no longer
+            PENDING. Surfaces as a 409.
+        ScheduledTransferRepositoryError: On a Firestore failure.
+    """
+    result: ScheduledTransferResponse = scheduled_service.cancel(
+        uid=uid,
+        scheduled_transfer_id=scheduled_transfer_id,
+    )
+    return _ok(result.model_dump(mode="json"))
