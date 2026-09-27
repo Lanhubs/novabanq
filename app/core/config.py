@@ -148,7 +148,7 @@ class Settings(BaseSettings):
     # in this file.
     # ------------------------------------------------------------------
     gemini_api_key: str = Field(default="")
-    gemini_model: str = Field(default="gemini-2.5-flash")
+    gemini_model: str = Field(default="gemini-flash-lite-latest")
 
     # ------------------------------------------------------------------
     # Feature flags

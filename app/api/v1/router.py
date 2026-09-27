@@ -8,6 +8,7 @@ else changes.
 from fastapi import APIRouter
 
 from app.features.accounts.router import router as accounts_router
+from app.features.ai_intent.router import router as ai_intent_router
 from app.features.funding.router import router as funding_router
 from app.features.identity.router import router as identity_router
 from app.features.otp.router import router as otp_router
@@ -26,3 +27,4 @@ api_router.include_router(
     transactions_router, prefix="/transactions", tags=["transactions"]
 )
 api_router.include_router(funding_router, prefix="", tags=["funding"])
+api_router.include_router(ai_intent_router, prefix="", tags=["ai"])
