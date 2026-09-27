@@ -15,17 +15,14 @@ class CreateAccountTagInputBottomSheet extends StatefulWidget {
   const CreateAccountTagInputBottomSheet({super.key, this.onTagCreated});
   final ValueChanged<String>? onTagCreated;
 
-  static Future<T?> show<T>(
-    BuildContext context, {
-    ValueChanged<String>? onTagCreated,
-  }) => showModalBottomSheet<T>(
-    context: context,
-    isScrollControlled: true,
-    backgroundColor: Colors.transparent,
-    barrierColor: Colors.black.withValues(alpha: 0.5),
-    builder: (_) =>
-        CreateAccountTagInputBottomSheet(onTagCreated: onTagCreated),
-  );
+  static Future<T?> show<T>(BuildContext context, {ValueChanged<String>? onTagCreated}) =>
+      showModalBottomSheet<T>(
+        context: context,
+        isScrollControlled: true,
+        backgroundColor: Colors.transparent,
+        barrierColor: Colors.black.withValues(alpha: 0.5),
+        builder: (_) => CreateAccountTagInputBottomSheet(onTagCreated: onTagCreated),
+      );
 
   @override
   State<CreateAccountTagInputBottomSheet> createState() => _TagSheetState();
@@ -93,13 +90,15 @@ class _TagSheetState extends State<CreateAccountTagInputBottomSheet> {
         ApiClient(),
       ).claimTag(input.text.trim().toLowerCase());
       final tag = data['tag']?.toString() ?? '';
-      if (Get.isRegistered<HomeController>())
+      if (Get.isRegistered<HomeController>()) {
         Get.find<HomeController>().loadProfile();
+      }
       widget.onTagCreated?.call(tag);
       if (!mounted) return;
       Navigator.of(context).pop(tag);
-      if (Get.context != null)
+      if (Get.context != null) {
         TagCreationSuccessBottomSheet.show(Get.context!, tag: tag);
+      }
     } on ApiFailure catch (failure) {
       if (mounted) setState(() => error = failure.message);
     } finally {

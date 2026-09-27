@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
+import 'package:novabanq/core/utils/helpers.dart';
 import 'package:novabanq/features/auth/views/widgets/verification_success_bottom_sheet.dart';
 
 mixin AuthPhoneVerificationMixin on GetxController {
@@ -14,8 +15,10 @@ mixin AuthPhoneVerificationMixin on GetxController {
 
   void deletePhoneNumberDigit() {
     if (phoneNumber.value.isNotEmpty) {
-      phoneNumber.value =
-          phoneNumber.value.substring(0, phoneNumber.value.length - 1);
+      phoneNumber.value = phoneNumber.value.substring(
+        0,
+        phoneNumber.value.length - 1,
+      );
     }
   }
 
@@ -34,8 +37,10 @@ mixin AuthPhoneVerificationMixin on GetxController {
 
   void deleteVerificationDigit() {
     if (verificationPin.value.isNotEmpty) {
-      verificationPin.value =
-          verificationPin.value.substring(0, verificationPin.value.length - 1);
+      verificationPin.value = verificationPin.value.substring(
+        0,
+        verificationPin.value.length - 1,
+      );
     }
   }
 
@@ -45,12 +50,10 @@ mixin AuthPhoneVerificationMixin on GetxController {
 
   void resendVerificationCode() {
     clearVerificationPin();
-    Get.snackbar(
-      'Code Sent',
-      'A new 5-digit verification code has been sent.',
-      snackPosition: SnackPosition.BOTTOM,
-      backgroundColor: const Color(0xFF005100),
-      colorText: Colors.white,
+    SnackBarHelper.showSuccess(
+      message: 'A new 5-digit verification code has been sent.',
+      title: 'Code Sent',
+      position: SnackPosition.BOTTOM,
       duration: const Duration(seconds: 2),
     );
   }

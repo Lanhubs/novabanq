@@ -3,11 +3,13 @@ import 'package:google_fonts/google_fonts.dart';
 
 class SendAmountDisplay extends StatelessWidget {
   final String amount;
+  final String symbol;
   final VoidCallback onTap;
 
   const SendAmountDisplay({
     super.key,
     required this.amount,
+    required this.symbol,
     required this.onTap,
   });
 
@@ -24,7 +26,7 @@ class SendAmountDisplay extends StatelessWidget {
           textBaseline: TextBaseline.alphabetic,
           children: [
             Text(
-              '₦ ',
+              '$symbol ',
               style: GoogleFonts.outfit(
                 fontSize: 40,
                 fontWeight: FontWeight.w700,

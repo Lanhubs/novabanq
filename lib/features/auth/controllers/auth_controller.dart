@@ -40,7 +40,8 @@ class AuthController extends GetxController {
   final accountPin = ''.obs;
   final resendSeconds = 0.obs;
   int resendGeneration = 0;
-  late final ProfileApi api;
+  ProfileApi get api => _api ??= ProfileApi(ApiClient());
+  ProfileApi? _api;
 
   int get indicatorIndex => switch (currentStep.value) {
     0 || 1 => 0,
@@ -66,7 +67,7 @@ class AuthController extends GetxController {
   void onInit() {
     super.onInit();
     selectedCountry = countries.first.obs;
-    if (FirebaseBootstrap.ready) api = ProfileApi(ApiClient());
+    if (FirebaseBootstrap.ready) _api = ProfileApi(ApiClient());
   }
 
   void toggleCountryDropdown() => isCountryDropdownOpen.toggle();
@@ -143,7 +144,7 @@ class AuthController extends GetxController {
     final result = await Get.toNamed(AppRoutes.faceScan);
     if (result == true) currentStep.value = 8;
   }
-
+  
   @override
   void onClose() {
     for (final item in [

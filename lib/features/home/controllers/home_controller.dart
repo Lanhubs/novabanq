@@ -1,9 +1,11 @@
-import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
+import 'package:novabanq/app/routes/app_routes.dart';
+import 'package:novabanq/core/utils/helpers.dart';
 import 'package:novabanq/features/auth/controllers/auth_controller.dart';
 import 'package:novabanq/core/network/api_client.dart';
 import 'package:novabanq/core/network/profile_api.dart';
+import 'package:novabanq/core/network/transfer_api.dart';
 import 'package:novabanq/core/services/firebase_bootstrap.dart';
 import '../models/home_country_currency.dart';
 import '../views/widgets/create_account_tag_bottom_sheet.dart';
@@ -22,7 +24,7 @@ class HomeController extends GetxController {
         : 'Pending';
   }
 
-  final balanceAmount = '—';
+  final balanceAmount = '—'.obs;
   final accountTag = ''.obs;
 
   // Selected country & currency
@@ -35,6 +37,7 @@ class HomeController extends GetxController {
   @override
   void onReady() {
     super.onReady();
+    loadAccount();
     loadProfile().then((_) {
       if (Get.arguments is Map &&
           (Get.arguments as Map)['fromSignUp'] == true &&
@@ -43,6 +46,19 @@ class HomeController extends GetxController {
         showAccountTagSheet();
       }
     });
+  }
+
+  Future<void> loadAccount() async {
+    try {
+      final account = await TransferApi(ApiClient()).getAccount();
+      balanceAmount.value = account.balanceDisplay;
+      final matching = kHomeSupportedCurrencies
+          .where((item) => item.currencyCode == account.currency)
+          .toList();
+      if (matching.isNotEmpty) selectCountryCurrency(matching.first);
+    } catch (_) {
+      balanceAmount.value = '—';
+    }
   }
 
   Future<void> loadProfile() async {
@@ -103,23 +119,19 @@ class HomeController extends GetxController {
     final number = profile['account_number']?.toString();
     if (number == null || number.isEmpty) return;
     Clipboard.setData(ClipboardData(text: number));
-    Get.snackbar(
-      'Copied',
-      'Account number copied to clipboard',
-      snackPosition: SnackPosition.BOTTOM,
-      backgroundColor: const Color(0xFF005100),
-      colorText: Colors.white,
+    SnackBarHelper.showSuccess(
+      message: 'Account number copied to clipboard',
+      title: 'Copied',
+      position: SnackPosition.BOTTOM,
       duration: const Duration(seconds: 2),
-      margin: const EdgeInsets.all(16),
-      borderRadius: 12,
     );
   }
 
   void onNotificationTap() {
-    Get.snackbar(
-      'Notifications',
-      'You have no new notifications.',
-      snackPosition: SnackPosition.TOP,
+    SnackBarHelper.showInfo(
+      message: 'You have no new notifications.',
+      title: 'Notifications',
+      position: SnackPosition.TOP,
       duration: const Duration(seconds: 2),
     );
   }
@@ -130,19 +142,10 @@ class HomeController extends GetxController {
 
   void onQuickAction(String action) {
     if (action == 'Send') {
-      Get.snackbar(
-        'Transfers pending',
-        'Transfers are not available yet.',
-        snackPosition: SnackPosition.BOTTOM,
-      );
-      return;
+      Get.toNamed(AppRoutes.sendMoney);
+    } else if (action == 'Receive') {
+      Get.toNamed(AppRoutes.receiveMoney);
     }
-    Get.snackbar(
-      action,
-      '$action is not available from the API yet.',
-      snackPosition: SnackPosition.BOTTOM,
-      duration: const Duration(seconds: 2),
-    );
   }
 
   void onSelectNavTab(int index) {

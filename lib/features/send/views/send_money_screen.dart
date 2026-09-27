@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
+import 'package:novabanq/core/utils/helpers.dart';
 import 'package:novabanq/features/auth/views/widgets/auth_cta_button.dart';
 import '../controllers/send_money_controller.dart';
 import 'widgets/recipient_account_card.dart';
@@ -24,7 +25,7 @@ class SendMoneyScreen extends GetView<SendMoneyController> {
                   child: SingleChildScrollView(
                     physics: const BouncingScrollPhysics(),
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 24,
+                      horizontal: 20,
                       vertical: 16,
                     ),
                     child: Column(
@@ -43,10 +44,10 @@ class SendMoneyScreen extends GetView<SendMoneyController> {
                             tagController: controller.accountTagController,
                             selectedBank: controller.selectedBank.value,
                             onSelectBank: () {
-                              Get.snackbar(
-                                'Select Bank',
-                                'Bank selection list coming soon.',
-                                snackPosition: SnackPosition.BOTTOM,
+                              SnackBarHelper.showInfo(
+                                message: 'Bank selection list coming soon.',
+                                title: 'Select Bank',
+                                position: SnackPosition.BOTTOM,
                               );
                             },
                           ),

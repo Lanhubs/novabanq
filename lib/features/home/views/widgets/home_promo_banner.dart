@@ -16,13 +16,13 @@ class HomePromoBanner extends StatelessWidget {
         children: [
           // Back Layer 1: Soft light blue tab
           Positioned(
-            top: -10,
+            top: -15,
             left: 2,
             right: 2,
             child: Container(
-              height: 24,
+              height: 60,
               decoration: BoxDecoration(
-                color: const Color(0xFFD6E4FF),
+                color: const Color(0x8A7CC4F8),
                 borderRadius: BorderRadius.circular(20),
               ),
             ),
@@ -30,13 +30,13 @@ class HomePromoBanner extends StatelessWidget {
 
           // Back Layer 2: Lilac / purple tab
           Positioned(
-            top: -5,
+            top: -10,
             left: 4,
             right: 4,
             child: Container(
-              height: 24,
+              height: 60,
               decoration: BoxDecoration(
-                color: const Color(0xFFE2B7E5),
+                color: const Color(0x8AF87CB2),
                 borderRadius: BorderRadius.circular(20),
               ),
             ),
@@ -47,11 +47,11 @@ class HomePromoBanner extends StatelessWidget {
             width: double.infinity,
             padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 18),
             decoration: BoxDecoration(
-              color: const Color(0xFFF26895),
+              color: const Color(0xFFF87CB2),
               borderRadius: BorderRadius.circular(20),
               boxShadow: [
                 BoxShadow(
-                  color: const Color(0xFFF26895).withValues(alpha: 0.3),
+                  color: const Color(0xFFF87CB2).withValues(alpha: 0.3),
                   blurRadius: 16,
                   offset: const Offset(0, 6),
                 ),

@@ -22,9 +22,9 @@ class RecipientAccountCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(20),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: const Color(0xFFF9FAFB),
+        color: const Color(0x21E7E9EC),
         borderRadius: BorderRadius.circular(20),
       ),
       child: Column(

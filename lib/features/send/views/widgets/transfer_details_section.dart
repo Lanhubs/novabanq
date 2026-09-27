@@ -8,6 +8,9 @@ class TransferDetailsSection extends StatelessWidget {
   final String accountNumber;
   final String dateTime;
   final String transactionId;
+  final String amountSent;
+  final String amountReceived;
+  final String fee;
   final VoidCallback onCopyTransactionId;
 
   const TransferDetailsSection({
@@ -17,6 +20,9 @@ class TransferDetailsSection extends StatelessWidget {
     required this.accountNumber,
     required this.dateTime,
     required this.transactionId,
+    required this.amountSent,
+    required this.amountReceived,
+    required this.fee,
     required this.onCopyTransactionId,
   });
 
@@ -39,18 +45,12 @@ class TransferDetailsSection extends StatelessWidget {
           value: status,
           valueColor: const Color(0xFF22C55E),
         ),
-        TransferDetailRow(
-          label: 'Account name',
-          value: accountName,
-        ),
-        TransferDetailRow(
-          label: 'Account number',
-          value: accountNumber,
-        ),
-        TransferDetailRow(
-          label: 'Date/Time',
-          value: dateTime,
-        ),
+        TransferDetailRow(label: 'Total debited', value: amountSent),
+        TransferDetailRow(label: 'Recipient receives', value: amountReceived),
+        TransferDetailRow(label: 'Transfer fee', value: fee),
+        TransferDetailRow(label: 'Account name', value: accountName),
+        TransferDetailRow(label: 'Account number', value: accountNumber),
+        TransferDetailRow(label: 'Date/Time', value: dateTime),
         TransferDetailRow(
           label: 'Transaction ID',
           value: transactionId,

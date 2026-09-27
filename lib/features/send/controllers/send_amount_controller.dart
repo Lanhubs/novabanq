@@ -1,140 +1,174 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
+import 'package:novabanq/core/network/api_client.dart';
+import 'package:novabanq/core/network/transfer_api.dart';
+import 'package:novabanq/core/utils/currency_symbols.dart';
+import 'package:novabanq/core/utils/idempotency.dart';
+import 'package:novabanq/core/utils/transfer_attempt_store.dart';
+import 'package:novabanq/features/send/bindings/transfer_success_binding.dart';
+import 'package:novabanq/features/send/models/transfer_quote.dart';
+import 'package:novabanq/features/send/models/transfer_result.dart';
+import 'package:novabanq/features/send/views/transfer_success_screen.dart';
+import 'package:novabanq/features/home/models/home_country_currency.dart';
+import 'package:novabanq/features/home/controllers/home_controller.dart';
 import '../views/widgets/confirm_transaction_bottom_sheet.dart';
 import '../views/widgets/transaction_pin_bottom_sheet.dart';
+import 'transfer_error_handler.dart';
+
+part 'send_amount_execution.dart';
+part 'send_amount_sheets.dart';
 
 class SendAmountController extends GetxController {
-  final recipientName = 'Clement Toluwalase Daniel'.obs;
-  final recipientAccount = '2212660740 Novabanq'.obs;
-  final amount = '2400'.obs;
-  final sourceAccountTitle = 'NGN Account Number'.obs;
-  final sourceAccountBalance = '100,000'.obs;
+  final recipientName = 'Recipient'.obs;
+  final recipientAccount = '—'.obs;
+  final recipientTag = ''.obs;
+  final senderCurrency = ''.obs;
+  final amount = '0'.obs;
+  final sourceAccountTitle = 'Account'.obs;
+  final sourceAccountBalance = '—'.obs;
   final transactionPin = ''.obs;
+  final isKeypadVisible = false.obs;
+  final isLoading = false.obs;
+  final isExecuting = false.obs;
+  final isAccountReady = false.obs;
+  final quote = Rxn<TransferQuote>();
+  String? _idempotencyKey;
+  String? _attemptFingerprint;
+  TransferApi get api => _api ??= TransferApi(ApiClient());
+  TransferApi? _api;
+  HomeCountryCurrency? _fromCountry;
+  HomeCountryCurrency? _toCountry;
 
-  final double exchangeRate = 24.0;
+  @override
+  void onInit() {
+    super.onInit();
+    final args = Get.arguments;
+    if (args is Map && args['recipient_tag'] != null) {
+      recipientTag.value = args['recipient_tag'].toString();
+      recipientAccount.value = '@${recipientTag.value}';
+    }
+    if (args is Map) {
+      _fromCountry = args['from_country'] is HomeCountryCurrency
+          ? args['from_country'] as HomeCountryCurrency
+          : null;
+      _toCountry = args['to_country'] is HomeCountryCurrency
+          ? args['to_country'] as HomeCountryCurrency
+          : null;
+    }
+    ever(amount, (_) => quote.value = null);
+    _loadAccount();
+  }
 
-  String get calculatedCedis {
-    final parsed = double.tryParse(amount.value.replaceAll(',', '')) ?? 0.0;
-    return (parsed / exchangeRate).floor().toString();
+  Future<void> _loadAccount() async {
+    try {
+      final account = await api.getAccount();
+      senderCurrency.value = account.currency;
+      sourceAccountTitle.value = '${account.currency} Account';
+      sourceAccountBalance.value = account.balanceDisplay;
+      isAccountReady.value = true;
+    } on ApiFailure catch (e) {
+      TransferErrorHandler.showSnack('Account unavailable', e.message);
+    } catch (_) {
+      TransferErrorHandler.showSnack(
+        'Account unavailable',
+        'Check your connection and try again.',
+      );
+    }
   }
 
   String get beneficiaryReceivesText {
-    return 'Beneficiary receives $calculatedCedis cedis';
+    final q = quote.value;
+    if (q == null || q.isExpired) {
+      return 'Get a quote to see what the beneficiary receives';
+    }
+    final symbol = CurrencySymbols.symbolFor(q.recipient.currency);
+    return 'Beneficiary receives $symbol ${CurrencySymbols.formatMinor(q.receiveAmountMinor, q.recipient.currency)}';
   }
 
   void appendDigit(String digit) {
     if (amount.value == '0') {
       amount.value = digit;
     } else if (amount.value.length < 9) {
-      amount.value = '${amount.value}$digit';
+      amount.value += digit;
     }
   }
 
-  void deleteDigit() {
-    if (amount.value.length > 1) {
-      amount.value = amount.value.substring(0, amount.value.length - 1);
-    } else {
-      amount.value = '0';
-    }
-  }
+  void deleteDigit() => amount.value = amount.value.length > 1
+      ? amount.value.substring(0, amount.value.length - 1)
+      : '0';
+  void clearAmount() => amount.value = '0';
+  void setPresetAmount(int preset) => amount.value = preset.toString();
+  void openKeypad() => isKeypadVisible.value = true;
+  void hideKeypad() => isKeypadVisible.value = false;
+  void toggleKeypad() => isKeypadVisible.value = !isKeypadVisible.value;
 
-  void clearAmount() {
-    amount.value = '0';
-  }
-
-  void setPresetAmount(int preset) {
-    amount.value = preset.toString();
-  }
-
-  final isKeypadVisible = false.obs;
-
-  void openKeypad() {
-    isKeypadVisible.value = true;
-  }
-
-  void hideKeypad() {
-    isKeypadVisible.value = false;
-  }
-
-  void toggleKeypad() {
-    isKeypadVisible.value = !isKeypadVisible.value;
-  }
-
-  void onContinue() {
+  Future<void> onContinue() async {
+    if (isLoading.value) return;
     hideKeypad();
-    Get.snackbar(
-      'Transfers pending',
-      'Transfers are not available from the API yet.',
-      snackPosition: SnackPosition.BOTTOM,
+    if (!isAccountReady.value) {
+      await _loadAccount();
+      if (!isAccountReady.value) return;
+    }
+    if (_fromCountry != null &&
+        _fromCountry!.currencyCode != senderCurrency.value) {
+      TransferErrorHandler.showSnack(
+        'Corridor mismatch',
+        'Your account uses ${senderCurrency.value}. Select that country as From.',
+      );
+      return;
+    }
+    final minor = CurrencySymbols.parseMinor(
+      amount.value,
+      senderCurrency.value,
     );
-  }
-
-  void showConfirmTransactionSheet() {
-    Get.bottomSheet(
-      ConfirmTransactionBottomSheet(
-        recipientName: recipientName.value,
-        fromAccount: 'NGN account',
-        amountFromAccount: amount.value,
-        amountToBeneficiary: calculatedCedis,
-        onConfirm: () {
-          Get.back();
-          showPinBottomSheet();
-        },
-      ),
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-    );
-  }
-
-  void showPinBottomSheet() {
-    transactionPin.value = '';
-    Get.bottomSheet(
-      Obx(
-        () => TransactionPinBottomSheet(
-          pin: transactionPin.value,
-          onKeyPress: (d) {
-            if (transactionPin.value.length < 4) {
-              transactionPin.value += d;
-            }
-          },
-          onBackspace: () {
-            if (transactionPin.value.isNotEmpty) {
-              transactionPin.value = transactionPin.value.substring(
-                0,
-                transactionPin.value.length - 1,
-              );
-            }
-          },
-          onClear: () => transactionPin.value = '',
-          onConfirm: () {
-            if (transactionPin.value.length == 4) {
-              completeTransaction();
-            } else {
-              Get.snackbar(
-                'Enter PIN',
-                'Please enter your complete 4-digit PIN',
-                snackPosition: SnackPosition.BOTTOM,
-                backgroundColor: const Color(0xFF101828),
-                colorText: Colors.white,
-                duration: const Duration(seconds: 2),
-                margin: const EdgeInsets.all(16),
-                borderRadius: 12,
-              );
-            }
-          },
-        ),
-      ),
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-    );
-  }
-
-  void completeTransaction() {
-    Get.back();
-    Get.snackbar(
-      'Transfers pending',
-      'No transfer was made.',
-      snackPosition: SnackPosition.BOTTOM,
-    );
+    if (minor == null || minor < 100) {
+      TransferErrorHandler.showSnack(
+        'Invalid amount',
+        senderCurrency.value == 'XOF'
+            ? 'Minimum transfer is 100 CFA.'
+            : 'Minimum transfer is 1.00.',
+      );
+      return;
+    }
+    try {
+      isLoading.value = true;
+      final q = await api.getQuote(
+        recipientTag: recipientTag.value,
+        amountMinor: minor,
+      );
+      if (q.isExpired ||
+          q.recipient.tag.isEmpty ||
+          q.recipient.currency.isEmpty ||
+          q.sendAmountMinor != minor ||
+          q.receiveAmountMinor <= 0 ||
+          q.totalDebitMinor < q.sendAmountMinor ||
+          q.senderCurrency != senderCurrency.value) {
+        throw const ApiFailure(
+          'INVALID_QUOTE',
+          'Unable to verify this quote. Please try again.',
+        );
+      }
+      if (_toCountry != null &&
+          q.recipient.country.toUpperCase() != _toCountry!.countryCode) {
+        throw const ApiFailure(
+          'CORRIDOR_MISMATCH',
+          'The recipient belongs to another country. Update the To country.',
+        );
+      }
+      quote.value = q;
+      recipientName.value = q.recipient.displayName.isEmpty
+          ? '@${q.recipient.tag}'
+          : q.recipient.displayName;
+      showConfirmTransactionSheet(q);
+    } on ApiFailure catch (e) {
+      TransferErrorHandler.handleQuoteError(e);
+    } catch (_) {
+      TransferErrorHandler.showSnack(
+        'Error',
+        'Unable to get quote. Try again.',
+      );
+    } finally {
+      isLoading.value = false;
+    }
   }
 }

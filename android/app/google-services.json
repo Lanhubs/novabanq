@@ -1,0 +1,39 @@
+{
+  "project_info": {
+    "project_number": "794566240712",
+    "project_id": "novabanq-ec947",
+    "storage_bucket": "novabanq-ec947.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:794566240712:android:41e95067414f261668b8fd",
+        "android_client_info": {
+          "package_name": "com.example.novabanq"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "794566240712-mda8oitbadtul5g09uqgjllb088ddfam.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBn1GE3KqkiP_65RL_GfRA43j6_qJuEYDY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "794566240712-mda8oitbadtul5g09uqgjllb088ddfam.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

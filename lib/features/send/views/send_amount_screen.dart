@@ -3,6 +3,7 @@ import 'package:get/get.dart';
 import 'package:novabanq/core/widgets/custom_numeric_keypad.dart';
 import 'package:novabanq/features/auth/views/widgets/auth_cta_button.dart';
 import '../controllers/send_amount_controller.dart';
+import 'package:novabanq/core/utils/currency_symbols.dart';
 import 'widgets/amount_recipient_card.dart';
 import 'widgets/beneficiary_receives_notice.dart';
 import 'widgets/preset_amount_chips_row.dart';
@@ -56,6 +57,9 @@ class SendAmountScreen extends GetView<SendAmountController> {
                             Obx(
                               () => SendAmountDisplay(
                                 amount: controller.amount.value,
+                                symbol: CurrencySymbols.symbolFor(
+                                  controller.senderCurrency.value,
+                                ),
                                 onTap: controller.toggleKeypad,
                               ),
                             ),
@@ -74,6 +78,9 @@ class SendAmountScreen extends GetView<SendAmountController> {
                               () => SendSourceAccountCard(
                                 title: controller.sourceAccountTitle.value,
                                 balance: controller.sourceAccountBalance.value,
+                                symbol: CurrencySymbols.symbolFor(
+                                  controller.senderCurrency.value,
+                                ),
                                 onChange: () {},
                               ),
                             ),
@@ -92,9 +99,15 @@ class SendAmountScreen extends GetView<SendAmountController> {
                             const SizedBox(height: 16),
 
                             // Continue Button
-                            AuthCtaButton(
-                              text: 'Continue',
-                              onPressed: controller.onContinue,
+                            Obx(
+                              () => AuthCtaButton(
+                                text: controller.isLoading.value
+                                    ? 'Getting quote...'
+                                    : 'Continue',
+                                onPressed: controller.isLoading.value
+                                    ? () {}
+                                    : controller.onContinue,
+                              ),
                             ),
 
                             const SizedBox(height: 12),

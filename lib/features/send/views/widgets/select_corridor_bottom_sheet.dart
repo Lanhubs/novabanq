@@ -4,35 +4,45 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:novabanq/core/widgets/sheet_drag_handle.dart';
 import 'package:novabanq/features/auth/views/widgets/auth_cta_button.dart';
 import 'package:novabanq/features/home/models/home_country_currency.dart';
+import 'package:novabanq/features/home/controllers/home_controller.dart';
 import 'package:novabanq/features/send/bindings/send_amount_binding.dart';
 import 'package:novabanq/features/send/views/send_amount_screen.dart';
 import 'corridor_country_selector.dart';
 import 'corridor_dashed_divider.dart';
 
 class SelectCorridorBottomSheet extends StatelessWidget {
-  const SelectCorridorBottomSheet({super.key});
+  final String? recipientTag;
 
-  static Future<T?> show<T>(BuildContext context) {
+  const SelectCorridorBottomSheet({super.key, this.recipientTag});
+
+  static Future<T?> show<T>(BuildContext context, {String? recipientTag}) {
     return showModalBottomSheet<T>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       barrierColor: Colors.black.withValues(alpha: 0.5),
-      builder: (ctx) => const SelectCorridorBottomSheet(),
+      builder: (ctx) => SelectCorridorBottomSheet(recipientTag: recipientTag),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    final fromCountry = kHomeSupportedCurrencies[0].obs; // Nigeria
-    final toCountry = kHomeSupportedCurrencies[1].obs; // Ghana
+    final fromCountry =
+        (Get.isRegistered<HomeController>()
+                ? Get.find<HomeController>().selectedCountryCurrency.value
+                : kHomeSupportedCurrencies.first)
+            .obs;
+    final suffix = recipientTag?.split('.').last.toUpperCase();
+    final matches = kHomeSupportedCurrencies.where(
+      (c) => c.countryCode == suffix,
+    );
+    final toCountry =
+        (matches.isEmpty ? kHomeSupportedCurrencies[1] : matches.first).obs;
 
     return Container(
       decoration: const BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.vertical(
-          top: Radius.circular(32),
-        ),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
       ),
       child: SafeArea(
         top: false,
@@ -117,6 +127,11 @@ class SelectCorridorBottomSheet extends StatelessWidget {
                   Get.to(
                     () => const SendAmountScreen(),
                     binding: SendAmountBinding(),
+                    arguments: {
+                      'recipient_tag': recipientTag,
+                      'from_country': fromCountry.value,
+                      'to_country': toCountry.value,
+                    },
                   );
                 },
               ),

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:get/get.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:novabanq/app/routes/app_routes.dart';
 import 'package:novabanq/core/widgets/google_logo.dart';
 import 'package:novabanq/features/auth/views/widgets/auth_cta_button.dart';
 import 'package:novabanq/features/auth/views/widgets/auth_text_field.dart';
@@ -121,9 +123,19 @@ class EmailStepView extends StatelessWidget {
         const SizedBox(height: 16),
 
         // Continue Button
-        AuthCtaButton(
-          onPressed: onContinue,
-          text: "Continue",
+        AuthCtaButton(onPressed: onContinue, text: "Continue"),
+        const SizedBox(height: 12),
+        Center(
+          child: TextButton(
+            onPressed: () => Get.toNamed(AppRoutes.login),
+            child: Text(
+              "Already have an account? Log in",
+              style: GoogleFonts.outfit(
+                fontSize: 13,
+                color: const Color(0xFF005100),
+              ),
+            ),
+          ),
         ),
       ],
     );

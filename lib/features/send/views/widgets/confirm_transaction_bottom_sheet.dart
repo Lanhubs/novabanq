@@ -9,6 +9,7 @@ class ConfirmTransactionBottomSheet extends StatelessWidget {
   final String fromAccount;
   final String amountFromAccount;
   final String amountToBeneficiary;
+  final String fee;
   final VoidCallback onConfirm;
 
   const ConfirmTransactionBottomSheet({
@@ -17,6 +18,7 @@ class ConfirmTransactionBottomSheet extends StatelessWidget {
     required this.fromAccount,
     required this.amountFromAccount,
     required this.amountToBeneficiary,
+    required this.fee,
     required this.onConfirm,
   });
 
@@ -64,30 +66,22 @@ class ConfirmTransactionBottomSheet extends StatelessWidget {
               const SizedBox(height: 24),
 
               // Detail Rows
-              TransactionDetailRow(
-                label: 'To',
-                value: recipientName,
-              ),
-              TransactionDetailRow(
-                label: 'From',
-                value: fromAccount,
-              ),
+              TransactionDetailRow(label: 'To', value: recipientName),
+              TransactionDetailRow(label: 'From', value: fromAccount),
               TransactionDetailRow(
                 label: 'Amount from account',
-                value: '₦ $amountFromAccount',
+                value: amountFromAccount,
               ),
+              TransactionDetailRow(label: 'Transfer fee', value: fee),
               TransactionDetailRow(
                 label: 'Amount to beneficiary',
-                value: '₵ $amountToBeneficiary',
+                value: amountToBeneficiary,
               ),
 
               const SizedBox(height: 28),
 
               // Confirm CTA Button
-              AuthCtaButton(
-                text: 'Confirm',
-                onPressed: onConfirm,
-              ),
+              AuthCtaButton(text: 'Confirm', onPressed: onConfirm),
             ],
           ),
         ),

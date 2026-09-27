@@ -11,6 +11,7 @@ class TransactionPinBottomSheet extends StatelessWidget {
   final VoidCallback onBackspace;
   final VoidCallback? onClear;
   final VoidCallback onConfirm;
+  final bool isLoading;
 
   const TransactionPinBottomSheet({
     super.key,
@@ -19,6 +20,7 @@ class TransactionPinBottomSheet extends StatelessWidget {
     required this.onBackspace,
     this.onClear,
     required this.onConfirm,
+    this.isLoading = false,
   });
 
   @override
@@ -51,7 +53,7 @@ class TransactionPinBottomSheet extends StatelessWidget {
 
             // Subtitle
             Text(
-              'Enter your 4-digit PIN to confirm this transaction',
+              'Enter your 5-digit PIN to confirm this transaction',
               textAlign: TextAlign.center,
               style: GoogleFonts.outfit(
                 fontSize: 13,
@@ -62,12 +64,12 @@ class TransactionPinBottomSheet extends StatelessWidget {
 
             const SizedBox(height: 20),
 
-            // 4-Digit PIN Display
+            // 5-Digit PIN Display
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 40.0),
+              padding: const EdgeInsets.symmetric(horizontal: 20.0),
               child: PinCodeDisplay(
                 pin: pin,
-                length: 4,
+                length: 5,
                 obscure: true,
               ),
             ),
@@ -78,8 +80,8 @@ class TransactionPinBottomSheet extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20.0),
               child: AuthCtaButton(
-                text: 'Confirm',
-                onPressed: onConfirm,
+                text: isLoading ? 'Confirming...' : 'Confirm',
+                onPressed: isLoading ? () {} : onConfirm,
               ),
             ),
 

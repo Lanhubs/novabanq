@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-
+import 'package:get/get.dart';
 class TransferSuccessHeader extends StatelessWidget {
   const TransferSuccessHeader({super.key});
 
@@ -11,8 +11,8 @@ class TransferSuccessHeader extends StatelessWidget {
       children: [
         Image.asset(
           'assets/icons/successful-payment.png',
-          width: 120,
-          height: 120,
+          width: Get.width * 0.4,
+
           fit: BoxFit.contain,
         ),
         const SizedBox(height: 18),
