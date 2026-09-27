@@ -35,18 +35,34 @@ CURRENCY_MINOR_UNITS: dict[Currency, int] = {
 }
 
 
-# Display symbol per currency. Used by ``format_amount`` to render
-# human-readable amounts in emails and receipts. The trailing space is
-# meaningful — XOF and ZAR take one between the symbol and the number,
-# NGN, GHS, and KES do not. XOF has no minor unit (see
-# CURRENCY_MINOR_UNITS above), so its amounts render with no decimal
-# places.
+# Currency → display symbol, for human-facing formatting (receipts,
+# emails, transaction history — see app/core/utils.format_amount).
+# Not for API responses: those use ISO codes (AccountResponse.currency,
+# etc.), never a symbol. Some symbols carry a trailing space so they
+# read naturally next to a number (e.g. "CFA 49,560", "R 505.00");
+# others don't (e.g. "₦57,134.11", "GH₵500.00") — the space, where
+# present, is part of the string here, not added by the caller.
 CURRENCY_DISPLAY_SYMBOL: dict[Currency, str] = {
     Currency.NGN: "₦",
     Currency.GHS: "GH₵",
     Currency.KES: "KSh",
     Currency.XOF: "CFA ",
     Currency.ZAR: "R ",
+}
+
+
+# Country → currency. Assigned automatically at profile creation from
+# the user's stated country — the user never chooses a currency
+# directly. Not one-to-one: Senegal and Ivory Coast both resolve to
+# XOF, since both are part of the West African monetary union (WAEMU)
+# and share the West African CFA franc.
+COUNTRY_CURRENCY: dict[Country, Currency] = {
+    Country.NIGERIA: Currency.NGN,
+    Country.GHANA: Currency.GHS,
+    Country.KENYA: Currency.KES,
+    Country.SENEGAL: Currency.XOF,
+    Country.IVORY_COAST: Currency.XOF,
+    Country.SOUTH_AFRICA: Currency.ZAR,
 }
 
 
@@ -58,20 +74,6 @@ ACCOUNT_NUMBER_COUNTRY_PREFIX: dict[Country, str] = {
     Country.SENEGAL: "04",
     Country.IVORY_COAST: "05",
     Country.SOUTH_AFRICA: "06",
-}
-
-
-# Country → default settlement currency. A user's currency is derived
-# from their country at signup — the client never states one. This is
-# not one-to-one: Senegal and Ivory Coast are both in the West African
-# monetary union and both settle in XOF.
-COUNTRY_CURRENCY: dict[Country, Currency] = {
-    Country.NIGERIA: Currency.NGN,
-    Country.GHANA: Currency.GHS,
-    Country.KENYA: Currency.KES,
-    Country.SENEGAL: Currency.XOF,
-    Country.IVORY_COAST: Currency.XOF,
-    Country.SOUTH_AFRICA: Currency.ZAR,
 }
 
 
@@ -126,7 +128,6 @@ class FirestoreCollection(StrEnum):
     LEDGER_ENTRIES = "ledger_entries"
     CORRIDORS = "corridors"
     CURRENCIES = "currencies"
-    VIRTUAL_ACCOUNT_REFS = "virtual_account_refs"
     FUNDING_RECORDS = "funding_records"
     SCHEDULED_TRANSFERS = "scheduled_transfers"
     IDEMPOTENCY_KEYS = "idempotency_keys"
@@ -204,18 +205,21 @@ class TransactionStatus(StrEnum):
 
 
 class ScheduledTransferStatus(StrEnum):
-    """Lifecycle state of a scheduled transfer.
+    """Lifecycle state of a scheduled transfer (distinct from
+    ``TransactionStatus``, which describes the ledger transaction a
+    scheduled transfer produces once it actually fires).
 
-    PENDING   — the schedule has been created and is waiting for its
-                ``execute_at`` time to arrive.
-    SETTLED   — the scheduler has fired and the underlying transfer
-                settled successfully. ``transaction_id`` on the
-                scheduled document is populated at this point.
-    FAILED    — the scheduler fired but the underlying transfer
-                failed (insufficient balance, recipient deleted, etc.).
-                ``failure_reason`` on the scheduled document carries
-                the specific error code that caused the failure.
-    CANCELLED — the user cancelled the schedule before it fired.
+    PENDING   — scheduled, not yet fired by the scheduler.
+    SETTLED   — fired, and the underlying transfer settled. A
+                ``transaction_id`` exists.
+    FAILED    — fired, but the underlying transfer failed (e.g.
+                insufficient balance at fire time). Under the ledger's
+                single-shot commit model a failed attempt writes
+                nothing, so no ``transaction_id`` exists for FAILED
+                either.
+    CANCELLED — the user cancelled it before it fired. No
+                ``transaction_id`` exists, for the same reason as
+                FAILED.
     """
 
     PENDING = "PENDING"
@@ -255,7 +259,6 @@ class ErrorCode(StrEnum):
     SCHEDULED_TRANSFER_NOT_FOUND = "SCHEDULED_TRANSFER_NOT_FOUND"
     RATE_EXPIRED = "RATE_EXPIRED"
     RATE_UNAVAILABLE = "RATE_UNAVAILABLE"
-    FX_PROVIDER_UNAVAILABLE = "FX_PROVIDER_UNAVAILABLE"
     AMOUNT_INVALID = "AMOUNT_INVALID"
     OTP_INVALID = "OTP_INVALID"
     OTP_EXPIRED = "OTP_EXPIRED"
@@ -275,6 +278,7 @@ class ErrorCode(StrEnum):
     LEDGER_PRECONDITION_VIOLATED = "LEDGER_PRECONDITION_VIOLATED"
     LEDGER_UNBALANCED = "LEDGER_UNBALANCED"
     TRANSACTION_NOT_FOUND = "TRANSACTION_NOT_FOUND"
+    FX_PROVIDER_UNAVAILABLE = "FX_PROVIDER_UNAVAILABLE"
     VALIDATION_ERROR = "VALIDATION_ERROR"
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
@@ -395,15 +399,15 @@ LEDGER_MAX_LEGS_PER_TRANSACTION = 20
 LEDGER_RATE_SCALE = 1_000_000
 
 # Transfer rules.
-# Enforced by the transfers, funding, and withdrawal services — NOT by
-# the ledger. The ledger's instruction validator does not enforce a
-# minimum; that is business policy belonging to the calling service,
-# per the ledger's documented scope.
+# Enforced by the transfers/funding/withdrawal services BEFORE they
+# construct a LedgerRequest — never inside the ledger itself. The
+# ledger only enforces structural invariants (every leg is a positive
+# integer, every currency balances); it deliberately has no notion of
+# "too small to be worth moving." See app/features/ledger/schemas.py.
 #
-# Minimum amount for any outbound transfer, expressed in minor units
-# of the sender's currency. Prevents zero-value transfers and dust
-# amounts that cost more to process than they move. Tune per corridor
-# when real fees are known.
+# Minimum amount for a user-initiated transfer, expressed in minor
+# units. Prevents zero-value transfers and dust amounts that cost more
+# to process than they move. Tune per corridor when real fees are known.
 TRANSFER_MIN_AMOUNT_MINOR = 100
 
 # Scheduled-transfer rules.
@@ -413,7 +417,13 @@ TRANSFER_MIN_AMOUNT_MINOR = 100
 # has passed, the transfer is marked FAILED with the reason "expired"
 # rather than fired silently hours late. Protects against an outage
 # causing a burst of stale transfers to execute all at once.
-SCHEDULED_TRANSFER_FIRE_WINDOW_MINUTES = 60
+#
+# 5 minutes is enough for a demo where the presenter schedules a
+# transfer for "in 2 minutes" and expects it to fire within a few
+# seconds of that time. In production this would be tuned higher — a
+# scheduler that runs every 30 seconds and an outage budget measured
+# in hours, not minutes.
+SCHEDULED_TRANSFER_FIRE_WINDOW_MINUTES = 5
 
 # How many due scheduled transfers the scheduler processes per pass.
 # Caps the work per iteration so one scheduler process can't be
