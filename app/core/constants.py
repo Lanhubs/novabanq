@@ -128,6 +128,7 @@ class FirestoreCollection(StrEnum):
     CURRENCIES = "currencies"
     VIRTUAL_ACCOUNT_REFS = "virtual_account_refs"
     FUNDING_RECORDS = "funding_records"
+    SCHEDULED_TRANSFERS = "scheduled_transfers"
     IDEMPOTENCY_KEYS = "idempotency_keys"
     OTP_CODES = "otp_codes"
     IDENTITY_VERIFICATIONS = "identity_verifications"
@@ -202,6 +203,27 @@ class TransactionStatus(StrEnum):
     FAILED = "FAILED"
 
 
+class ScheduledTransferStatus(StrEnum):
+    """Lifecycle state of a scheduled transfer.
+
+    PENDING   — the schedule has been created and is waiting for its
+                ``execute_at`` time to arrive.
+    SETTLED   — the scheduler has fired and the underlying transfer
+                settled successfully. ``transaction_id`` on the
+                scheduled document is populated at this point.
+    FAILED    — the scheduler fired but the underlying transfer
+                failed (insufficient balance, recipient deleted, etc.).
+                ``failure_reason`` on the scheduled document carries
+                the specific error code that caused the failure.
+    CANCELLED — the user cancelled the schedule before it fired.
+    """
+
+    PENDING = "PENDING"
+    SETTLED = "SETTLED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
 class RateSource(StrEnum):
     """Where a corridor's current rate came from.
 
@@ -230,6 +252,7 @@ class ErrorCode(StrEnum):
     SELF_TRANSFER = "SELF_TRANSFER"
     CORRIDOR_UNSUPPORTED = "CORRIDOR_UNSUPPORTED"
     DUPLICATE_TRANSFER = "DUPLICATE_TRANSFER"
+    SCHEDULED_TRANSFER_NOT_FOUND = "SCHEDULED_TRANSFER_NOT_FOUND"
     RATE_EXPIRED = "RATE_EXPIRED"
     RATE_UNAVAILABLE = "RATE_UNAVAILABLE"
     FX_PROVIDER_UNAVAILABLE = "FX_PROVIDER_UNAVAILABLE"
@@ -382,6 +405,20 @@ LEDGER_RATE_SCALE = 1_000_000
 # amounts that cost more to process than they move. Tune per corridor
 # when real fees are known.
 TRANSFER_MIN_AMOUNT_MINOR = 100
+
+# Scheduled-transfer rules.
+# How long after a transfer's scheduled ``execute_at`` time the
+# scheduler is permitted to fire it and still count as on time. If the
+# scheduler was down and comes back to find a transfer whose window
+# has passed, the transfer is marked FAILED with the reason "expired"
+# rather than fired silently hours late. Protects against an outage
+# causing a burst of stale transfers to execute all at once.
+SCHEDULED_TRANSFER_FIRE_WINDOW_MINUTES = 60
+
+# How many due scheduled transfers the scheduler processes per pass.
+# Caps the work per iteration so one scheduler process can't be
+# swamped by a large backlog of due items in a single loop.
+SCHEDULED_TRANSFER_BATCH_SIZE = 25
 
 # FX rules.
 # A rate is considered fresh for this long. Requests within the window

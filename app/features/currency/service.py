@@ -1,10 +1,11 @@
 """Currency service.
 
-The public interface of the currency module. One function — ``get_rate``
-— returns a usable rate for a currency pair, refreshing it from
-FxRatesAPI when the cached value is stale.
+The public interface of the currency module. Two functions return
+values used by the transfer pricing path: ``get_rate`` returns a
+usable FX rate, and ``get_fee_bps`` returns the operator-configured
+fee for a pair.
 
-The read path is the whole point of this layer:
+The read path for a rate is the whole point of this layer:
 
     1. Read the corridor from Firestore.
     2. If missing, raise ``CorridorUnsupportedError`` — the pair isn't
@@ -23,7 +24,7 @@ The read path is the whole point of this layer:
        a rate this old would be dishonest.
 
 Every caller — the transfers service, the seed script, reconciliation —
-gets the same behavior through the same function. There is no bypass.
+gets the same behavior through the same functions. There is no bypass.
 """
 
 import logging
@@ -44,7 +45,8 @@ logger = logging.getLogger(__name__)
 
 # Default fee applied to a corridor the first time it is created. Once
 # a corridor exists, ``_try_refresh`` reads its stored fee and preserves
-# it — this default is only used at seed time.
+# it — this default is only used at seed time, or as a fallback when a
+# corridor document predates the ``fee_bps`` field.
 DEFAULT_FEE_BPS = 100  # 1%
 
 
@@ -146,6 +148,46 @@ def get_rate(
         int(age_seconds),
     )
     raise RateUnavailableError()
+
+
+def get_fee_bps(
+    from_currency: Currency,
+    to_currency: Currency,
+) -> int:
+    """Return the configured fee, in basis points, for a currency pair.
+
+    Reads the corridor's ``fee_bps`` field — the operator-configured
+    fee for this specific pair. This is the value that should be used
+    when pricing a transfer; ``DEFAULT_FEE_BPS`` is only a fallback
+    for the case where the corridor document predates the ``fee_bps``
+    field or the read fails.
+
+    Exposing this as a public function is deliberate. The fee is a
+    per-corridor business parameter — an operator tunes it by editing
+    the corridor document, and every quote and settlement on that
+    corridor must reflect the configured value. Callers that use
+    ``DEFAULT_FEE_BPS`` directly bypass that and silently charge every
+    corridor the same fee, making per-corridor tuning a no-op.
+
+    Args:
+        from_currency: The base currency.
+        to_currency: The quote currency.
+
+    Returns:
+        The corridor's ``fee_bps`` if it is present and well-formed,
+        otherwise ``DEFAULT_FEE_BPS``.
+    """
+    stored_fee = repository.get_fee_bps(from_currency, to_currency)
+    if stored_fee is None:
+        logger.warning(
+            "No stored fee_bps for corridor %s/%s; falling back to "
+            "DEFAULT_FEE_BPS=%d.",
+            from_currency.value,
+            to_currency.value,
+            DEFAULT_FEE_BPS,
+        )
+        return DEFAULT_FEE_BPS
+    return stored_fee
 
 
 def refresh_corridor(

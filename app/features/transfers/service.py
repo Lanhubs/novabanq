@@ -4,17 +4,23 @@ Orchestrates the whole transfer flow: quote and execute. Ties
 together the validator, the fee calculator, the idempotency module,
 the executor, and the accounts and currency services.
 
-Two entry points:
+Three public entry points:
 
     * ``quote(...)`` — resolve the recipient, compute amounts, return
       what the user will confirm. Read-only, no money moves.
 
-    * ``execute(...)`` — verify the PIN, check idempotency, build the
-      ledger request via the executor, and return the settled result.
+    * ``execute(...)`` — the immediate-transfer path. Verifies the
+      PIN, checks idempotency, and settles through the ledger.
 
-Both are idempotent from the caller's perspective: a repeated quote
-just recomputes with a fresh rate; a repeated execute returns the
-original result (via the ledger's idempotency key check).
+    * ``execute_pre_authorized(...)`` — the deferred-transfer path
+      for scheduled transfers. Identical to ``execute()`` except the
+      PIN is not verified here; the caller is expected to have
+      verified it out-of-band. See the function docstring for the
+      full contract.
+
+All three are idempotent from the caller's perspective: a repeated
+quote just recomputes with a fresh rate; a repeated execute returns
+the original result (via the ledger's idempotency key check).
 
 Check ordering in ``execute`` is deliberate: idempotency is checked
 first (a single cheap read, before anything else), then the checks
@@ -170,7 +176,7 @@ def execute(
     idempotency_key: str,
     pin: str,
 ) -> TransferResponse:
-    """Execute a transfer and return the settled result.
+    """Execute an immediate transfer and return the settled result.
 
     The PIN is verified here, against the sender's stored hash, using
     the same lockout policy as the standalone ``verify_pin`` endpoint.
@@ -210,6 +216,140 @@ def execute(
         InvalidIdempotencyKeyError: If the key is malformed.
         LedgerRepositoryError: On a Firestore failure.
     """
+    sender_profile, recipient_profile = _load_profiles_for_transfer(
+        sender_uid=sender_uid,
+        recipient_tag=recipient_tag,
+        send_amount_minor=send_amount_minor,
+        idempotency_key=idempotency_key,
+    )
+
+    # Wrap the PIN verification so a lockout triggers the security
+    # notification before the exception propagates. The notification
+    # call itself cannot raise — see notifications.service — so the
+    # original PinLockedError is guaranteed to reach the router
+    # unchanged, even if Brevo is down.
+    try:
+        users_service.verify_pin_for_uid(sender_uid, pin)
+    except users_service.PinLockedError:
+        notifications_service.send_pin_lockout(profile=sender_profile)
+        raise
+
+    return _settle_transfer(
+        sender_uid=sender_uid,
+        sender_profile=sender_profile,
+        recipient_profile=recipient_profile,
+        recipient_tag=recipient_tag,
+        send_amount_minor=send_amount_minor,
+        idempotency_key=idempotency_key,
+    )
+
+
+def execute_pre_authorized(
+    *,
+    sender_uid: str,
+    recipient_tag: str,
+    send_amount_minor: int,
+    idempotency_key: str,
+) -> TransferResponse:
+    """Execute a transfer whose sender has already been authenticated.
+
+    Identical to ``execute()`` in every way except one: **the PIN is
+    not verified here.** The caller is asserting that the sender's
+    identity was established out-of-band before this call.
+
+    The intended caller is the scheduled-transfer service. That flow
+    verifies the sender's PIN at *scheduling* time — when the user is
+    present and can be challenged — and then fires the transfer at
+    the scheduled moment, when the PIN no longer exists anywhere and
+    cannot be re-verified. By the time this function runs, the
+    schedule itself is the authorization: the user, having proved who
+    they are, asked the platform to send money at a specific future
+    time.
+
+    **Any future caller of this function assumes the same
+    responsibility**: establishing that the sender authorized the
+    transfer through some means the platform trusts. A caller that
+    skips authentication entirely — e.g. a route that maps directly
+    to this function without a PIN check — would let anyone drain any
+    account. Do not add callers without a corresponding
+    authorization story.
+
+    The docstring is the contract. There is no runtime check that
+    can distinguish "the scheduler, which legitimately pre-authorized
+    this" from "a new endpoint that forgot the PIN check." Keep the
+    trust boundary at the caller, and keep the list of callers short.
+
+    Args:
+        sender_uid: The uid of the sender whose identity was
+            established out-of-band.
+        recipient_tag: Normalized recipient tag.
+        send_amount_minor: Amount in the sender's currency, minor
+            units.
+        idempotency_key: Caller-generated key for deduplication. For
+            scheduled transfers, this is derived deterministically
+            from the scheduled-transfer id so that a retry of the
+            same scheduled execution cannot settle twice.
+
+    Returns:
+        A populated ``TransferResponse``.
+
+    Raises:
+        UserNotFoundError: If the sender has no profile.
+        RecipientNotFoundError: If the recipient tag resolves to no
+            user.
+        DuplicateTransferError: If the idempotency key has been used.
+        SelfTransferError: If sender and recipient are the same user.
+        AmountBelowMinimumError: If the amount is below the platform
+            minimum.
+        CorridorUnsupportedError: If the currencies have no configured
+            corridor.
+        RateUnavailableError: If no trustworthy rate is available.
+        InsufficientBalanceError: If the sender's balance cannot cover
+            send + fee.
+        InvalidIdempotencyKeyError: If the key is malformed.
+        LedgerRepositoryError: On a Firestore failure.
+    """
+    sender_profile, recipient_profile = _load_profiles_for_transfer(
+        sender_uid=sender_uid,
+        recipient_tag=recipient_tag,
+        send_amount_minor=send_amount_minor,
+        idempotency_key=idempotency_key,
+    )
+
+    return _settle_transfer(
+        sender_uid=sender_uid,
+        sender_profile=sender_profile,
+        recipient_profile=recipient_profile,
+        recipient_tag=recipient_tag,
+        send_amount_minor=send_amount_minor,
+        idempotency_key=idempotency_key,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Shared pre-flight checks
+# ---------------------------------------------------------------------------
+
+def _load_profiles_for_transfer(
+    *,
+    sender_uid: str,
+    recipient_tag: str,
+    send_amount_minor: int,
+    idempotency_key: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run the idempotency and pre-flight checks shared by both paths.
+
+    Returns the two loaded profiles. The checks run in this order on
+    purpose — see the module docstring:
+
+        1. Idempotency key format.
+        2. Idempotency key already used?
+        3. Load sender and recipient profiles.
+        4. Cheap validators (self-transfer, amount minimum, corridor).
+
+    Both public entry points call this and then diverge only on
+    whether the PIN is verified.
+    """
     idempotency.validate_key(idempotency_key)
 
     # Checked first, before any other work: a retry of an
@@ -224,9 +364,9 @@ def execute(
     recipient_profile = _resolve_recipient(recipient_tag)
 
     # Self-transfer, amount-minimum, and corridor-support need nothing
-    # beyond the two profiles already loaded. Run them before the PIN
-    # check, so a request that was always going to fail for one of
-    # these reasons doesn't also make the sender spend a real PIN
+    # beyond the two profiles already loaded. Run them before any
+    # further work, so a request that was always going to fail for one
+    # of these reasons doesn't also make the sender spend a real PIN
     # attempt first.
     validator.validate_quote(
         sender_profile=sender_profile,
@@ -235,17 +375,58 @@ def execute(
         recipient_tag=recipient_tag,
     )
 
-    # Wrap the PIN verification so a lockout triggers the security
-    # notification before the exception propagates. The notification
-    # call itself cannot raise — see notifications.service — so the
-    # original PinLockedError is guaranteed to reach the router
-    # unchanged, even if Brevo is down.
-    try:
-        users_service.verify_pin_for_uid(sender_uid, pin)
-    except users_service.PinLockedError:
-        notifications_service.send_pin_lockout(profile=sender_profile)
-        raise
+    return sender_profile, recipient_profile
 
+
+# ---------------------------------------------------------------------------
+# Shared settlement
+# ---------------------------------------------------------------------------
+
+def _settle_transfer(
+    *,
+    sender_uid: str,
+    sender_profile: dict[str, Any],
+    recipient_profile: dict[str, Any],
+    recipient_tag: str,
+    send_amount_minor: int,
+    idempotency_key: str,
+) -> TransferResponse:
+    """Settle a transfer through the ledger and notify both parties.
+
+    The single place the actual money movement happens for both
+    immediate and scheduled transfers. Takes already-loaded profiles
+    so the caller has already run ``_load_profiles_for_transfer``.
+
+    Whether the sender's PIN was verified is a decision the caller
+    makes; this function does not know or care. That keeps the PIN
+    concern at the entry points where the authorization context is
+    known, and this shared body purely about the mechanics of
+    moving money.
+
+    Args:
+        sender_uid: The sender's uid.
+        sender_profile: The sender's loaded profile.
+        recipient_profile: The recipient's loaded profile.
+        recipient_tag: The normalized recipient tag (needed for the
+            executor's snapshot).
+        send_amount_minor: Amount in the sender's currency, minor
+            units.
+        idempotency_key: Key for deduplication at the ledger level.
+
+    Returns:
+        A populated ``TransferResponse``.
+
+    Raises:
+        InsufficientBalanceError: If the sender's balance cannot cover
+            send + fee.
+        RateUnavailableError: If no trustworthy rate is available.
+        LedgerRepositoryError: On a Firestore failure.
+        CorridorUnsupportedError: If the currencies have no configured
+            corridor.
+        AmountBelowMinimumError: If the amount is below the platform
+            minimum.
+        SelfTransferError: If sender and recipient are the same user.
+    """
     from_currency = Currency(sender_profile["currency"])
     to_currency = Currency(recipient_profile["currency"])
 
@@ -353,31 +534,38 @@ def _build_breakdown(
     from_currency: Currency,
     to_currency: Currency,
 ) -> fee_calculator.FeeBreakdown:
-    """Fetch the rate and compute the fee breakdown.
+    """Fetch the rate and fee, then compute the fee breakdown.
 
     Same-currency transfers skip the FX rate lookup — the rate is
     exactly 1, and getting a corridor for GHS/GHS would be a lookup
     that returns nothing anyway (a currency doesn't have a corridor
-    to itself).
+    to itself). There's also no corridor to read a fee from in that
+    case, so the platform default applies.
 
-    Cross-currency transfers go through the currency service, which
-    handles the cache and the staleness limit. The raw rate returned
-    here may carry more precision than the ledger stores — callers
-    must run it through ``_quantize_rate`` before using it for display
-    or for ``_rate_scaled``, never round it independently in two
-    places.
+    Cross-currency transfers go through the currency service for both
+    the rate and the fee. The fee MUST come from
+    ``currency_service.get_fee_bps``, not ``DEFAULT_FEE_BPS`` directly
+    — the corridor document's ``fee_bps`` is the operator-configured
+    fee for that specific pair, and using the platform default
+    unconditionally here would silently ignore it, making "tune the
+    fee per corridor" a no-op no matter what's stored in Firestore.
+
+    The raw rate returned here may carry more precision than the
+    ledger stores — callers must run it through ``_quantize_rate``
+    before using it for display or for ``_rate_scaled``, never round
+    it independently in two places.
     """
     if from_currency == to_currency:
         rate = Decimal("1")
+        fee_bps = currency_service.DEFAULT_FEE_BPS
     else:
-        exchange_rate = currency_service.get_rate(
-            from_currency, to_currency
-        )
+        exchange_rate = currency_service.get_rate(from_currency, to_currency)
         rate = exchange_rate.rate
+        fee_bps = currency_service.get_fee_bps(from_currency, to_currency)
 
     return fee_calculator.compute(
         send_amount_minor=send_amount_minor,
-        fee_bps=currency_service.DEFAULT_FEE_BPS,
+        fee_bps=fee_bps,
         from_currency=from_currency,
         to_currency=to_currency,
         rate=rate,
