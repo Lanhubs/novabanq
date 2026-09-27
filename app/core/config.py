@@ -130,6 +130,27 @@ class Settings(BaseSettings):
     flutterwave_secret_hash: str = Field(default="")
 
     # ------------------------------------------------------------------
+    # Gemini (AI intent parsing)
+    #
+    # Used by the AI intent feature to extract structured transfer
+    # instructions from natural language — e.g. turning "send 5000 to
+    # david.ng at 5pm" into a parsed action, amount, recipient tag, and
+    # execution time. Free tier is sufficient for the hackathon; get a
+    # key at https://aistudio.google.com/apikey.
+    #
+    # The model name is configurable so the deployment can swap between
+    # flash and pro without a code change. Defaults to flash — this is
+    # a structured-extraction task, not a reasoning task.
+    #
+    # The key is deliberately optional at settings-load time. The
+    # failure surfaces via ``require_gemini_config()`` at the call
+    # site, matching the pattern used for every other optional vendor
+    # in this file.
+    # ------------------------------------------------------------------
+    gemini_api_key: str = Field(default="")
+    gemini_model: str = Field(default="gemini-2.5-flash")
+
+    # ------------------------------------------------------------------
     # Feature flags
     # ------------------------------------------------------------------
     demo_mode: bool = Field(default=True)
@@ -312,6 +333,29 @@ class Settings(BaseSettings):
             )
 
         return base_url, api_key
+
+    def require_gemini_config(self) -> tuple[str, str]:
+        """Return (api_key, model_name) for Gemini.
+
+        Raises RuntimeError with a clear message if the API key is
+        missing so the app fails at the call site, not silently with
+        a confusing 401 from Google.
+        """
+        api_key = self.gemini_api_key
+        model = self.gemini_model
+
+        if not api_key:
+            raise RuntimeError(
+                "Gemini is not configured. Missing environment variable: "
+                "GEMINI_API_KEY"
+            )
+        if not model:
+            raise RuntimeError(
+                "Gemini is not configured. Missing environment variable: "
+                "GEMINI_MODEL"
+            )
+
+        return api_key, model
 
 
 @lru_cache(maxsize=1)

@@ -10,7 +10,12 @@ Current contents:
     * ``format_amount`` — render a minor-unit integer as a
       human-readable string with the correct currency symbol, decimal
       places, and thousands separators.
+    * ``amount_to_minor`` — convert a major-unit ``Decimal`` to an
+      integer count of minor units, with exact math and no silent
+      truncation.
 """
+
+from decimal import Decimal
 
 from app.core.constants import CURRENCY_DISPLAY_SYMBOL, CURRENCY_MINOR_UNITS, Currency
 
@@ -90,3 +95,52 @@ def _group_thousands(digits: str) -> str:
     value, which is exact because the value is already a Python int.
     """
     return f"{int(digits):,}"
+
+
+def amount_to_minor(amount_major: Decimal, currency: Currency) -> int:
+    """Convert a major-unit ``Decimal`` amount to an integer minor-unit amount.
+
+    Uses exact ``Decimal`` math — never ``float`` — and refuses amounts
+    that carry more precision than the currency's minor unit supports,
+    rather than silently truncating a fraction of a cent. A user who
+    types ``19.999`` for a two-decimal currency is told the amount is
+    invalid; the function does not guess which cent they meant.
+
+    Shared between ``scripts/fund_user.py`` (a CLI tool for crediting
+    balances) and the AI intent service (which parses a major-unit
+    amount out of a user's natural-language instruction). Kept here so
+    there is exactly one major-to-minor conversion in the codebase and
+    no chance of the two diverging on rounding.
+
+    Examples::
+
+        amount_to_minor(Decimal("19.99"),  Currency.NGN)  -> 1999
+        amount_to_minor(Decimal("5000"),   Currency.GHS)  -> 500000
+        amount_to_minor(Decimal("49560"),  Currency.XOF)  -> 49560
+
+    Args:
+        amount_major: The amount in major units (e.g. ``Decimal("19.99")``
+            for 19.99 naira).
+        currency: The currency the amount is denominated in.
+
+    Returns:
+        The amount in minor units, as a positive integer.
+
+    Raises:
+        ValueError: If the amount is not positive, or carries more
+            precision than the currency supports.
+    """
+    if amount_major <= 0:
+        raise ValueError(f"Amount must be positive, got {amount_major}.")
+
+    scale = CURRENCY_MINOR_UNITS[currency]
+    exact_minor = amount_major * scale
+    amount_minor = int(exact_minor)
+
+    if exact_minor != amount_minor:
+        raise ValueError(
+            f"{amount_major} has more precision than {currency.value} "
+            f"supports ({scale} minor units per major unit)."
+        )
+
+    return amount_minor

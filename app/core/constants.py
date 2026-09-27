@@ -88,6 +88,34 @@ COUNTRY_TAG_SUFFIX: dict[Country, str] = {
 }
 
 
+# Country → IANA timezone name. Used by the AI intent service to
+# convert a user's local wall-clock time ("5pm") into UTC
+# deterministically, rather than trusting the LLM to do timezone
+# arithmetic — which it can't do reliably, and which would produce a
+# scheduled transfer that fires at the wrong hour with no downstream
+# check to catch it.
+#
+# Every country NovaBanq supports is on a fixed offset with no DST:
+#   Africa/Lagos          UTC+1 (Nigeria, no DST)
+#   Africa/Accra          UTC+0 (Ghana, no DST)
+#   Africa/Nairobi        UTC+3 (Kenya, no DST)
+#   Africa/Dakar          UTC+0 (Senegal, no DST)
+#   Africa/Abidjan        UTC+0 (Ivory Coast, no DST)
+#   Africa/Johannesburg   UTC+2 (South Africa, no DST)
+#
+# The mapping is keyed by Country, not Currency, because the two are
+# not one-to-one — Senegal and Ivory Coast share XOF but are different
+# timezones.
+COUNTRY_TIMEZONE: dict[Country, str] = {
+    Country.NIGERIA: "Africa/Lagos",
+    Country.GHANA: "Africa/Accra",
+    Country.KENYA: "Africa/Nairobi",
+    Country.SENEGAL: "Africa/Dakar",
+    Country.IVORY_COAST: "Africa/Abidjan",
+    Country.SOUTH_AFRICA: "Africa/Johannesburg",
+}
+
+
 class FirestoreCollection(StrEnum):
     USERS = "users"
     TAGS = "tags"
