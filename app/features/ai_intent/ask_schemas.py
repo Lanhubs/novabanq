@@ -40,7 +40,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class AskKind(StrEnum):
-    """The eight question types Nova can classify a user's question into.
+    """The nine question types Nova can classify a user's question into.
 
     ``StrEnum`` so the value serializes to its string form
     (``"BALANCE"``) in JSON, and comparisons against the value work
@@ -59,11 +59,16 @@ class AskKind(StrEnum):
     COUNTERPARTY_DETAILS  transaction history with one counterparty
     SPENDING_ADVICE       recent transaction patterns, aggregated
     GENERAL_FINANCE       none — general knowledge, no data lookup
+    TRANSFER_INTENT       none — redirect reply, no data lookup
     UNKNOWN               none — fallback reply, no data lookup
     ===================== ==========================================
 
-    See ``NO_DATA_ASK_KINDS`` for the "none" rows as a checkable set
-    rather than this prose table.
+    See ``NO_DATA_ASK_KINDS`` for the "none" rows that are answered
+    from a template without any data fetch at all. ``TRANSFER_INTENT``
+    is also answerless, but it's short-circuited in ``answer_question``
+    before ``_fetch_data`` is ever reached, so it isn't a member of
+    that set — the set means "kinds that *reach* the fetch step but
+    need no data," and ``TRANSFER_INTENT`` never reaches it.
     """
 
     GREETING = "GREETING"
@@ -73,6 +78,7 @@ class AskKind(StrEnum):
     COUNTERPARTY_DETAILS = "COUNTERPARTY_DETAILS"
     SPENDING_ADVICE = "SPENDING_ADVICE"
     GENERAL_FINANCE = "GENERAL_FINANCE"
+    TRANSFER_INTENT = "TRANSFER_INTENT"
     UNKNOWN = "UNKNOWN"
 
 
@@ -83,6 +89,14 @@ class AskKind(StrEnum):
 # inside the class would raise TypeError at import time for a
 # StrEnum. Defining it here, right after the class, keeps it next to
 # what it describes without that trap.
+#
+# Note the membership: this set is specifically "kinds that pass
+# through the data-fetch step but do not need any data." Kinds whose
+# answer is produced by a short-circuit template in
+# ``answer_question`` never reach the fetch step at all, so they're
+# not members. If a future kind is added that reaches the fetch step
+# and needs nothing, add it here; if it short-circuits earlier, leave
+# it out.
 NO_DATA_ASK_KINDS: frozenset[AskKind] = frozenset(
     {AskKind.GREETING, AskKind.GENERAL_FINANCE, AskKind.UNKNOWN}
 )
@@ -106,8 +120,9 @@ class AskRequest(BaseModel):
             "The user's question, verbatim. Any of: a greeting, a "
             "balance check, a question about past transactions, a "
             "spending summary, a request for advice based on the "
-            "user's own spending, a general money question, or "
-            "something unrelated that will fall through to UNKNOWN."
+            "user's own spending, a general money question, a "
+            "send-money instruction, or something unrelated that "
+            "will fall through to UNKNOWN."
         ),
         examples=["who did I send money to last?", "what's my balance?"],
     )
@@ -123,10 +138,10 @@ class AskResponse(BaseModel):
     BALANCE, a small table for a SPENDING_SUMMARY, and so on.
 
     The ``data`` field is typed ``dict[str, Any] | None`` deliberately,
-    rather than a discriminated union of seven per-kind models. The
+    rather than a discriminated union of nine per-kind models. The
     shapes are small and varied (a balance is two fields, a summary is
     four, a counterparty detail is a handful), the frontend mostly
-    renders them optionally, and seven near-identical response
+    renders them optionally, and nine near-identical response
     containers would be real overhead for little safety gained. The
     service layer defines a ``TypedDict`` per kind for internal
     type-checking on the *construction* side — those aren't exposed
@@ -139,6 +154,8 @@ class AskResponse(BaseModel):
     (an ``int`` in minor units, or a pre-formatted string) rather than
     a raw ``Decimal`` — a static field type can't catch that for an
     ``Any``-typed value the way it could for a properly typed field.
+    ``ask_service._json_safe`` is the boundary sanitizer that enforces
+    this guarantee structurally.
 
     Frozen — a response is a read-only projection.
     """
@@ -149,7 +166,7 @@ class AskResponse(BaseModel):
         ...,
         description=(
             "The classification of the user's question. Determines "
-            "the shape of ``data``. Always one of the eight "
+            "the shape of ``data``. Always one of the nine "
             "``AskKind`` members."
         ),
         examples=["BALANCE"],
@@ -167,10 +184,11 @@ class AskResponse(BaseModel):
         description=(
             "Structured data behind the answer, if any was needed. "
             "Null for the kinds in ``NO_DATA_ASK_KINDS`` (``GREETING``, "
-            "``GENERAL_FINANCE``, ``UNKNOWN``) — none of those fetch "
-            "from the user's account. For other kinds, the shape "
-            "depends on ``kind``; see ``AskKind``'s docstring for the "
-            "per-kind shape table."
+            "``GENERAL_FINANCE``, ``UNKNOWN``) and for "
+            "``TRANSFER_INTENT`` — none of those fetch from the "
+            "user's account. For other kinds, the shape depends on "
+            "``kind``; see ``AskKind``'s docstring for the per-kind "
+            "shape table."
         ),
         examples=[{"balance_minor": 234050, "currency": "GHS"}],
     )

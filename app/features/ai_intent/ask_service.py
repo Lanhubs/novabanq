@@ -1,16 +1,21 @@
 """AI ask service.
 
 Answers a user's natural-language question about their own money.
-Two Gemini calls, one repository lookup, and a deterministic branch
-for greetings:
+Two Gemini calls per question, plus a repository lookup when the
+question needs one:
 
-    1. Classify the question with Gemini into one of eight
-       ``AskKind`` values, plus an optional counterparty reference
-       and period.
+    1. Classify the question with Gemini into one of nine
+       ``AskKind`` values, plus an optional counterparty reference,
+       period, and count.
     2. If the kind needs data, fetch it from ``ask_repository``.
-    3. Produce the answer. Greetings use a template — no Gemini call.
-       Everything else gets a second Gemini call with the fetched
-       data in the prompt.
+    3. Answer with a second Gemini call, with the fetched data (or
+       "none") embedded in the prompt.
+
+The one exception is ``TRANSFER_INTENT``: a message like "send 200 to
+david.ng" typed into the question chat. It's a real intent the user
+expressed, but this endpoint doesn't execute transfers. It's answered
+by a fixed template that acknowledges the intent and points the user
+at the send flow, without a second model call.
 
 Fail-soft policy:
 
@@ -23,15 +28,19 @@ Fail-soft policy:
         * Gemini returns an unknown kind string  → ``AskKind.UNKNOWN``
         * Gemini returns malformed JSON          → ``AskKind.UNKNOWN``
         * Gemini returns a bad period            → ``"all_time"``
+        * Gemini returns a bad count             → ignored (None)
         * Counterparty reference doesn't match   → answer says so
-        * Gemini is unreachable                  → ``AskProviderUnavailableError``
+        * Gemini is unreachable (data kind)      → ``AskProviderUnavailableError``
+        * Gemini is unreachable (GREETING/UNKNOWN) → static template fallback
         * Firestore is down while fetching data  → propagates (502)
 
-    The last two still raise, because a user who asked about their
-    balance deserves to know the balance couldn't be read — not a
-    friendly "I didn't understand." Everything the model does wrong,
-    though, is recoverable, because the model is the component most
-    likely to surprise us.
+    The split in the two Gemini-unreachable lines is deliberate. A
+    question about the user's balance deserves an honest failure
+    rather than a friendly "I didn't understand" when the model can't
+    be reached — the balance is real data, and its absence is worth
+    surfacing. But GREETING and UNKNOWN never had account data at
+    stake in the first place, so a warm canned line beats a 502 for
+    the two lowest-stakes kinds in the feature.
 
 Data safety:
 
@@ -68,6 +77,7 @@ from app.features.ai_intent.ask_prompts import (
     CAPABILITY_HINT,
     CLASSIFY_PROMPT,
     GREETING_TEMPLATE,
+    TEAM,
     UNKNOWN_FALLBACK_TEMPLATE,
 )
 from app.features.ai_intent.ask_schemas import (
@@ -86,6 +96,11 @@ logger = logging.getLogger(__name__)
 _VALID_PERIODS = frozenset(
     {"today", "last_week", "last_month", "last_year", "all_time"}
 )
+
+# Kinds whose answer is produced from a fixed template if Gemini is
+# unreachable, rather than raising. See the module docstring's
+# fail-soft policy for the reasoning.
+_LOW_STAKES_KINDS = frozenset({AskKind.GREETING, AskKind.UNKNOWN})
 
 
 # ---------------------------------------------------------------------------
@@ -119,17 +134,19 @@ class AskProviderUnavailableError(NovaBanqError):
 class _GeminiClassification(BaseModel):
     """The shape Gemini fills in for the classification call.
 
-    Two nullable fields and one fixed-vocabulary field. The kind is a
-    string here (not the ``AskKind`` enum) because this model is
-    filled directly by Gemini, and the SDK's structured output works
-    with primitive types — the service converts the string to
-    ``AskKind`` afterward, with a fallback to ``UNKNOWN`` if the
-    string isn't one of the eight.
+    Three nullable extraction fields and one fixed-vocabulary field.
+    Every extractable value is typed loosely here (str for the kind,
+    int-or-null for the count) because this model is filled directly
+    by Gemini and the SDK's structured output works with primitive
+    types. The service coerces and validates each field afterward,
+    with a documented fallback for every field that could arrive
+    wrong.
     """
 
     kind: str | None = None
     counterparty_tag: str | None = None
     period: str | None = None
+    count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -140,12 +157,15 @@ class _Classification:
     ``period`` is guaranteed to be one of the five valid strings.
     ``counterparty_tag`` is passed through as-is — the repository is
     what resolves it, and an unresolvable value produces a friendly
-    "not found" answer rather than an error.
+    "not found" answer rather than an error. ``count`` is a positive
+    integer when the user asked about a specific number of recent
+    transactions, otherwise None.
     """
 
     kind: AskKind
     counterparty_tag: str | None
     period: str
+    count: int | None
 
 
 # ---------------------------------------------------------------------------
@@ -171,8 +191,10 @@ def answer_question(
     Raises:
         UserNotFoundError: If the caller has no profile.
         AskProviderUnavailableError: If Gemini is unreachable for the
-            classification call, or for an answer that genuinely
-            needed the model.
+            classification call, or for the answer of a data-backed
+            kind. GREETING and UNKNOWN never raise on an unreachable
+            answer call — they fall back to a static template; see
+            the module docstring.
         AccountUnavailableError: On a Firestore failure reading the
             account, when the question was about the balance.
         TransactionRepositoryError: On a Firestore failure reading
@@ -184,27 +206,19 @@ def answer_question(
 
     classification = _classify(question=question, country=country)
 
-    # Greeting is fully deterministic — no data fetch, no answer call.
-    if classification.kind is AskKind.GREETING:
+    # TRANSFER_INTENT short-circuits to a fixed reply. This chat does
+    # not execute transfers; the reply acknowledges what the user
+    # asked for and points them at the send flow. No data fetch, no
+    # answer call — the reply is a template because there is nothing
+    # for the model to decide here, and a template is guaranteed
+    # on-message every time.
+    if classification.kind is AskKind.TRANSFER_INTENT:
         return AskResponse(
-            kind=AskKind.GREETING,
-            answer=GREETING_TEMPLATE.format(
-                first_name=first_name,
-                assistant_name=ASSISTANT_NAME,
-                capability_hint=CAPABILITY_HINT,
-            ),
-            data=None,
-        )
-
-    # UNKNOWN short-circuits as well. The fallback template is warmer
-    # than what Gemini would produce on a question that has no data
-    # behind it, and it never pays for a second model call.
-    if classification.kind is AskKind.UNKNOWN:
-        return AskResponse(
-            kind=AskKind.UNKNOWN,
-            answer=UNKNOWN_FALLBACK_TEMPLATE.format(
-                first_name=first_name,
-                capability_hint=CAPABILITY_HINT,
+            kind=AskKind.TRANSFER_INTENT,
+            answer=(
+                f"{first_name}, it looks like you want to send money — "
+                "tap 'Send money' in the app and I'll guide you through "
+                "it. For your security, transfers always need your PIN."
             ),
             data=None,
         )
@@ -215,12 +229,50 @@ def answer_question(
     )
     data = _json_safe(data)
 
-    answer = _answer(
-        question=question,
-        classification=classification,
-        first_name=first_name,
-        data=data,
-    )
+    # Both GREETING and UNKNOWN go through the answer call — a real
+    # model turn is what lets a hello and a goodbye get different
+    # replies. The static templates only kick in as a fail-soft
+    # backstop when Gemini is unreachable.
+    try:
+        answer = _answer(
+            question=question,
+            classification=classification,
+            first_name=first_name,
+            data=data,
+        )
+    except AskProviderUnavailableError:
+        if classification.kind is AskKind.GREETING:
+            logger.warning(
+                "Gemini answer call unavailable for GREETING; "
+                "returning static greeting template."
+            )
+            return AskResponse(
+                kind=AskKind.GREETING,
+                answer=GREETING_TEMPLATE.format(
+                    first_name=first_name,
+                    assistant_name=ASSISTANT_NAME,
+                    capability_hint=CAPABILITY_HINT,
+                ),
+                data=None,
+            )
+        if classification.kind is AskKind.UNKNOWN:
+            logger.warning(
+                "Gemini answer call unavailable for UNKNOWN; "
+                "returning static fallback template."
+            )
+            return AskResponse(
+                kind=AskKind.UNKNOWN,
+                answer=UNKNOWN_FALLBACK_TEMPLATE.format(
+                    first_name=first_name,
+                    capability_hint=CAPABILITY_HINT,
+                ),
+                data=None,
+            )
+        # Any other kind — BALANCE, SPENDING_SUMMARY, and so on — had
+        # real data at stake. Let the error propagate; the frontend
+        # shows the user an honest "try again" rather than a reply
+        # that pretends to have answered.
+        raise
 
     return AskResponse(
         kind=classification.kind,
@@ -238,7 +290,7 @@ def _classify(*, question: str, country: Country) -> _Classification:
 
     Falls back to ``AskKind.UNKNOWN`` on any recoverable failure:
     invalid JSON from the model, a kind string that isn't one of the
-    eight, or a missing kind field. An unreachable provider propagates
+    nine, or a missing kind field. An unreachable provider propagates
     as ``AskProviderUnavailableError`` — the frontend shows the user a
     "try again" rather than pretending the assistant has no idea what
     they asked.
@@ -272,7 +324,10 @@ def _classify(*, question: str, country: Country) -> _Classification:
             "UNKNOWN."
         )
         return _Classification(
-            kind=AskKind.UNKNOWN, counterparty_tag=None, period="all_time"
+            kind=AskKind.UNKNOWN,
+            counterparty_tag=None,
+            period="all_time",
+            count=None,
         )
 
     try:
@@ -283,7 +338,10 @@ def _classify(*, question: str, country: Country) -> _Classification:
             raw_text,
         )
         return _Classification(
-            kind=AskKind.UNKNOWN, counterparty_tag=None, period="all_time"
+            kind=AskKind.UNKNOWN,
+            counterparty_tag=None,
+            period="all_time",
+            count=None,
         )
 
     # Coerce the kind string to AskKind, falling back to UNKNOWN on
@@ -303,12 +361,30 @@ def _classify(*, question: str, country: Country) -> _Classification:
     # Period — anything not in the valid set becomes "all_time".
     period = parsed.period if parsed.period in _VALID_PERIODS else "all_time"
 
+    # Count — a positive integer, or None. Zero and negative values
+    # are ignored: the classifier is instructed to return a count only
+    # when the user asked about a specific number of recent
+    # transactions, and "last 0" or "last -3" are not meaningful
+    # queries. Treating them as None lets the summary fall back to
+    # the period (which the classifier will have set to "all_time" if
+    # it didn't recognize a period).
+    count: int | None = None
+    if isinstance(parsed.count, int) and not isinstance(parsed.count, bool):
+        if parsed.count > 0:
+            count = parsed.count
+        else:
+            logger.info(
+                "Classifier returned non-positive count %r; ignoring.",
+                parsed.count,
+            )
+
     # counterparty_tag is passed through as-is (or None). The
     # repository is what decides whether it matches anything.
     return _Classification(
         kind=kind,
         counterparty_tag=parsed.counterparty_tag,
         period=period,
+        count=count,
     )
 
 
@@ -326,6 +402,11 @@ def _fetch_data(
     Returns None for the kinds in ``NO_DATA_ASK_KINDS`` — those are
     answered from the model's own knowledge, with no account lookup.
     For the rest, dispatches to the matching repository function.
+
+    Note that ``TRANSFER_INTENT`` never reaches this function — it is
+    short-circuited in ``answer_question`` before the fetch step. That
+    is why it is not a member of ``NO_DATA_ASK_KINDS``, which means
+    "kinds that reach this step and need no data".
 
     The returned dict is not yet sanitized for the response boundary
     — that happens once, centrally, in ``answer_question`` via
@@ -350,7 +431,11 @@ def _fetch_data(
 
     if kind is AskKind.SPENDING_SUMMARY:
         since = _period_to_since(classification.period)
-        return ask_repository.summarize_spending(sender_uid, since)
+        return ask_repository.summarize_spending(
+            sender_uid,
+            since,
+            limit=classification.count,
+        )
 
     if kind is AskKind.COUNTERPARTY_DETAILS:
         if not classification.counterparty_tag:
@@ -368,7 +453,7 @@ def _fetch_data(
     if kind is AskKind.SPENDING_ADVICE:
         return ask_repository.summarize_for_advice(sender_uid, days=30)
 
-    # Any kind that slipped past the classifier's eight should have
+    # Any kind that slipped past the classifier's nine should have
     # become UNKNOWN already. If we reach here, be defensive.
     logger.error(
         "Unhandled AskKind in _fetch_data: %s. Falling through to no data.",
@@ -388,7 +473,7 @@ def _answer(
     first_name: str,
     data: dict[str, Any] | None,
 ) -> str:
-    """Generate the human-readable answer for a data-backed question.
+    """Generate the human-readable answer.
 
     A second Gemini call, with the fetched data embedded in the
     prompt. The prompt is written to cite only what's in the data —
@@ -396,15 +481,22 @@ def _answer(
     not by the code but by the prompt's rules and the fact that the
     model never sees anything else.
 
-    The ``{data}`` placeholder is filled with a JSON dump of the
-    fetched dict (or the string "none" if there was nothing to fetch,
-    which happens for GENERAL_FINANCE). JSON is deliberate: the model
-    is more reliable at reading structured input than at parsing
-    prose tables, and a small dict serializes to a small token count.
+    The ``{team}`` placeholder is filled with the platform's team
+    roster from ``ask_prompts.TEAM`` — the same fixed, authoritative
+    list the answer prompt uses when a user asks who built NovaBanq.
+    Filling it here rather than baking it into the prompt string
+    keeps a single source of truth for the names.
 
-    An unreachable provider propagates — a question about the user's
-    balance deserves an error the frontend can act on, not a
-    hallucinated figure.
+    The ``{data}`` placeholder is filled with a JSON dump of the
+    fetched dict, or the string "none" when there was nothing to
+    fetch. That includes GREETING, GENERAL_FINANCE, and UNKNOWN, none
+    of which need account data — the answer prompt is written to
+    handle a "none" data block gracefully for each.
+
+    An unreachable provider propagates as
+    ``AskProviderUnavailableError``. ``answer_question`` is what
+    decides whether to swallow it (for the low-stakes kinds) or
+    re-raise it (for anything with real data at stake).
     """
     api_key, model_name = settings.require_gemini_config()
     client = genai.Client(api_key=api_key)
@@ -421,6 +513,7 @@ def _answer(
 
     system_instruction = ANSWER_PROMPT.format(
         assistant_name=ASSISTANT_NAME,
+        team=TEAM,
         question=question,
         kind=classification.kind.value,
         first_name=first_name,
