@@ -108,15 +108,16 @@ Every response, success or failure, uses the same shape.
 | Status | Meaning | Typical context |
 | --- | --- | --- |
 | `200` | OK | Successful request |
-| `201` | Created | Profile or PIN created |
+| `201` | Created | Profile, PIN, transfer, or scheduled transfer created |
 | `400` | Bad Request | Malformed JSON or invalid request body |
 | `401` | Unauthorized | Missing, invalid, or expired token |
 | `403` | Forbidden | Authenticated but not permitted (e.g. email not verified) |
-| `404` | Not Found | Resource does not exist (e.g. no user profile) |
-| `409` | Conflict | Already exists (e.g. tag taken, PIN already set) |
+| `404` | Not Found | Resource does not exist (e.g. no user profile, no transaction) |
+| `409` | Conflict | Already exists, or already settled (e.g. tag taken, PIN already set, duplicate transfer) |
 | `422` | Unprocessable Entity | Validation failure or business rule violation |
 | `429` | Too Many Requests | Rate limited (e.g. PIN locked, OTP cooldown active) |
 | `500` | Internal Error | Server-side exception |
+| `502` | Bad Gateway | An upstream provider failed — FX rates, KYC, email, funding, or the AI provider — or a ledger/infrastructure failure occurred |
 
 ---
 
@@ -146,7 +147,20 @@ Switch app logic on `error.code`. Do not rely on `error.message` for business de
 | `IDENTITY_VERIFICATION_FAILED` | BVN or face verification rejected | Show retry, or contact support |
 | `IDENTITY_ALREADY_VERIFIED` | Identity already verified, names locked | Route to dashboard |
 | `IDENTITY_PROVIDER_UNAVAILABLE` | KYC provider, Cloudinary, or the verification repository is down | Show retry later message |
-| `INTERNAL_ERROR` | Unhandled backend exception, including Cloudinary misconfiguration on `GET /identity/upload-signature` | Show a generic error notice and log it |
+| `INTERNAL_ERROR` | Unhandled backend exception, or an upstream provider failure | Show a generic error notice and log it |
+| `RECIPIENT_NOT_FOUND` | The recipient `@tag` does not resolve to any user | Show "no user found with that tag" |
+| `SELF_TRANSFER` | Sender and recipient are the same user | Block the transfer client-side before confirming |
+| `AMOUNT_INVALID` | Amount below the platform minimum or malformed | Show the minimum amount |
+| `CORRIDOR_UNSUPPORTED` | The two currencies have no configured FX corridor | Tell the user this pair isn't supported yet |
+| `INSUFFICIENT_BALANCE` | Balance cannot cover the total debit | Show the shortfall amount |
+| `DUPLICATE_TRANSFER` | This idempotency key has already settled | Fetch the original result by transaction id — do not retry |
+| `RATE_UNAVAILABLE` | FX provider unreachable and the cached rate is too stale | Show a "try again in a moment" message |
+| `FX_PROVIDER_UNAVAILABLE` | FX provider rejected the request (auth, quota) | Same message to the user; log the code for backend diagnostics |
+| `TRANSACTION_NOT_FOUND` | Transaction id does not exist, or the caller is not on it | Show a "not found" message |
+| `SCHEDULED_TRANSFER_NOT_FOUND` | Scheduled-transfer id does not exist, or the caller is not its owner | Show a "not found" message |
+| `FUNDING_PROVIDER_UNAVAILABLE` | Flutterwave provider stub reached, or the real provider is down | Show retry later message |
+
+> **A code that does *not* exist:** `INVALID_IDEMPOTENCY_KEY` is not a real value — confirmed directly against `app/core/constants.py`'s `ErrorCode` enum. A malformed idempotency key on `POST /transfers` or `POST /transfers/scheduled` surfaces as `VALIDATION_ERROR` instead. If you see any error-handling code or an older doc referencing `INVALID_IDEMPOTENCY_KEY`, it's stale — fix it to check for `VALIDATION_ERROR`.
 
 ---
 
@@ -185,6 +199,8 @@ Google sign-in registration
 > See [Section 9](#9-identity-verification-kyc) for the full identity verification flow.
 
 > **UI guidance (Google sign-in):** At the profile step, always ask the user to enter or confirm their First, Middle, and Last name manually. Legal names must match their identity documents for KYC.
+
+> **After onboarding:** the user has a profile, an `@tag`, a `PIN`, and (optionally) verified identity. The account balance starts at zero. To fund the account or send money, see [Section 7.3 (Transfers)](#73-transfers), [Section 7.4 (Accounts)](#74-accounts), [Section 7.5 (Transactions)](#75-transactions), and [Section 7.6 (Funding)](#76-funding).
 
 > **Phone verification is not part of onboarding.** It happens later, from the dashboard. See [Section 8](#8-phone-verification-firebase-phone-auth).
 
@@ -474,6 +490,278 @@ POST /users/me/phone/verify
 
 See [Section 8](#8-phone-verification-firebase-phone-auth) for the full flow.
 
+### 7.3 Transfers
+
+Two-step flow: quote, then confirm. All endpoints require `Authorization: Bearer <token>`.
+
+#### Quote a transfer
+
+```http
+POST /transfers/quote
+```
+
+```json
+{
+  "recipient_tag": "david.ng",
+  "amount_minor": 50000
+}
+```
+
+* `recipient_tag` — full tag including country suffix. Leading `@` is stripped. Case-insensitive.
+* `amount_minor` — integer, in the **sender's** currency, minor units. Minimum is `TRANSFER_MIN_AMOUNT_MINOR` (100). Does not include the fee.
+
+Returns a full quote: sender currency, recipient summary (name, tag, currency), send amount, fee, total debit, receive amount, rate (as a decimal string, 6 decimal places), and an `expires_at` timestamp.
+
+**Errors:** `RECIPIENT_NOT_FOUND`, `SELF_TRANSFER`, `VALIDATION_ERROR`, `CORRIDOR_UNSUPPORTED`, `RATE_UNAVAILABLE`, `FX_PROVIDER_UNAVAILABLE`.
+
+#### Execute a transfer
+
+```http
+POST /transfers
+```
+
+```json
+{
+  "recipient_tag": "david.ng",
+  "amount_minor": 50000,
+  "idempotency_key": "01HZX8V5K2N3P4Q5R6S7T8U9V0",
+  "pin": "48392"
+}
+```
+
+Returns `201 Created` with the settled transaction: `transaction_id`, `status: "SETTLED"`, the applied `quote`, and `settled_at`. Both parties receive an email notification.
+
+**Errors:** all from quote, plus `DUPLICATE_TRANSFER` (409, retry-safe — the original already settled), `PIN_INVALID`, `PIN_LOCKED`, `INSUFFICIENT_BALANCE`. A malformed idempotency key (wrong length or shape) surfaces as `VALIDATION_ERROR`, not a dedicated code — see the note under Section 5.
+
+**Idempotency:** generate a unique `idempotency_key` per transfer attempt. On a network failure, retry with the **same key** — the backend will not settle twice. Do not generate a new key on retry.
+
+#### Schedule a transfer
+
+```http
+POST /transfers/scheduled
+```
+
+```json
+{
+  "recipient_tag": "david.ng",
+  "amount_minor": 50000,
+  "idempotency_key": "01HZX8V5K2N3P4Q5R6S7T8U9V0",
+  "pin": "48392",
+  "execute_at": "2026-09-28T17:00:00Z"
+}
+```
+
+* `execute_at` — UTC timestamp, must be in the future.
+* The PIN is verified at scheduling time. It is **not** re-verified when the transfer fires.
+* Returns `201 Created` with a scheduled-transfer record: `scheduled_transfer_id`, `status: "PENDING"`, `execute_at`.
+
+The transfer fires automatically via the in-process scheduler, within a few seconds of `execute_at`. Transfers whose fire window has passed (5 minutes by default) are marked `FAILED` with reason `SCHEDULED_TRANSFER_EXPIRED` rather than fired late.
+
+**This endpoint, and the list endpoint below, are fully functional today.** The two endpoints after that are not — read the warnings before building against them.
+
+#### List scheduled transfers
+
+```http
+GET /transfers/scheduled
+```
+
+Returns all the caller's scheduled transfers, newest first. **Fully functional.**
+
+#### Fetch a single scheduled transfer
+
+```http
+GET /transfers/scheduled/{scheduled_transfer_id}
+```
+
+> ⚠️ **Not yet functional.** This route is registered and reachable, but the service function it depends on (`scheduled_service.get_one`) is not implemented yet — calling it fails server-side rather than returning a clean 404 or the record. **Do not build a "view schedule details" screen against this until the backend confirms it's implemented.** In the meantime, the list endpoint above already returns every field this endpoint would — filter the list response client-side for the id you want instead.
+
+Scoped, once implemented: a caller who is not the owner gets a 404.
+
+#### Cancel a pending scheduled transfer
+
+```http
+POST /transfers/scheduled/{scheduled_transfer_id}/cancel
+```
+
+> ⚠️ **Not yet functional**, for the same reason as above — `scheduled_service.cancel` isn't implemented. **Do not ship a "cancel" button against this endpoint** until the backend confirms it works; a user who taps cancel and gets a raw server error is worse than not offering the feature yet.
+
+Intended behavior, once implemented: only works on `PENDING` transfers. Returns `404 SCHEDULED_TRANSFER_NOT_FOUND` if the id is unknown or not owned by the caller. Returns `409` for anything already `SETTLED`, `FAILED`, or `CANCELLED` — the exact `error.code` for that specific conflict has not yet been confirmed against the backend source, so don't hardcode a guess for it.
+
+**Statuses:** `PENDING`, `SETTLED`, `FAILED`, `CANCELLED`. Only `PENDING` is mutable.
+
+### 7.4 Accounts
+
+#### Get account balance
+
+```http
+GET /accounts/me
+```
+
+```json
+{
+  "success": true,
+  "data": {
+    "currency": "NGN",
+    "balance_minor": 5713411,
+    "balance_display": "57,134.11",
+    "updated_at": "2026-09-25T18:47:03.115Z"
+  },
+  "error": null
+}
+```
+
+* One account per user, in the user's country currency. Created automatically on first read.
+* `balance_minor` is an integer in minor units. **Never a float.**
+* `balance_display` is a pre-formatted string with thousands separators and the correct decimal places. Display it as-is; do not reformat.
+* **XOF is special:** no minor unit, `balance_display` has zero decimals.
+
+### 7.5 Transactions
+
+#### List transaction history
+
+```http
+GET /transactions?limit=20
+```
+
+Returns the caller's transactions — both sent and received — newest first. Each item is described from the caller's perspective: `direction` is `"IN"` if the caller received money, `"OUT"` if the caller sent it. `counterparty` is the other party (never the caller). Null for funding (money came from outside) and withdrawal (money left outside).
+
+* `limit` — optional query parameter, 1–100, default 20.
+* `next_cursor` — opaque pagination cursor, or `null` if no more results. Do not parse it, pass it back verbatim.
+
+#### Fetch a single transaction
+
+```http
+GET /transactions/{transaction_id}
+```
+
+Scoped: a caller who is neither the sender nor the recipient gets a 404, same as if the id didn't exist.
+
+### 7.6 Funding
+
+#### Get or create a virtual account
+
+```http
+POST /funding/virtual-account
+```
+
+No request body. Idempotent — returns the same account on repeat calls.
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "account_number": "1546629060",
+    "bank_name": "NovaBanq GH",
+    "account_name": "David Chashama Mensah",
+    "currency": "GHS",
+    "country": "GH",
+    "provider_ref": "mock_cfc2fe49aed84907a6b9d1c91a256e58",
+    "created_at": "2026-09-26T16:53:45.746965Z"
+  },
+  "error": null
+}
+```
+
+The user gives this account number to their bank or mobile money app to make a deposit.
+
+* `provider_ref` — the provider's opaque reference for this account. Save it; you need it to fire the demo webhook.
+
+#### Receive deposit webhook
+
+```http
+POST /webhooks/flutterwave
+```
+
+**Not called by the mobile app in production.** Called by Flutterwave when a deposit settles. **For the demo**, the app fires this directly with a payload that mimics Flutterwave's, so the whole funding pipeline runs.
+
+Request body:
+
+```json
+{
+  "event": "charge.completed",
+  "data": {
+    "id": "demo-1790461559309",
+    "tx_ref": "mock_cfc2fe49aed84907a6b9d1c91a256e58",
+    "amount": 250.00,
+    "currency": "GHS",
+    "status": "successful"
+  }
+}
+```
+
+* `data.id` — must be **unique per deposit**. Use `"demo-${DateTime.now().millisecondsSinceEpoch}"`.
+* `data.tx_ref` — the `provider_ref` from the virtual account response.
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": { "status": "ok", "credited": true },
+  "error": null
+}
+```
+
+`credited: true` means the ledger credited the user's balance. `credited: false` means the event was a duplicate, was ignored (wrong event type or status), or was rejected as corrupt.
+
+### 7.7 AI Assistant
+
+Three endpoints, all authenticated the same way as every other user-facing endpoint.
+
+#### Parse a natural-language transfer instruction
+
+```http
+POST /ai/parse-transfer
+```
+
+```json
+{ "text": "send 5000 to david.ng at 5pm" }
+```
+
+Returns the structured intent (amount, recipient, optional `execute_at`), the resolved recipient's full name, the full quote, and the original text. Read-only — no money moves. The frontend uses this to render a confirmation screen.
+
+#### Execute a natural-language transfer
+
+```http
+POST /ai/execute-transfer
+```
+
+```json
+{
+  "text": "send 5000 to david.ng",
+  "pin": "48392",
+  "confirmed_recipient_uid": null
+}
+```
+
+Returns `201 Created` with a **discriminated union**:
+
+* `data.kind: "IMMEDIATE"` — the transfer settled. The full `TransferResponse` is in `data.transfer`.
+* `data.kind: "SCHEDULED"` — a schedule was created. The full `ScheduledTransferResponse` is in `data.scheduled_transfer`.
+
+* The PIN is never sent to the language model. It's a separate request field.
+* `confirmed_recipient_uid` — optional. If provided, the tag is re-resolved and the request is rejected if it resolves to a different uid. This supports the two-step confirm flow.
+
+#### Ask Nova a question
+
+```http
+POST /ai/ask
+```
+
+```json
+{ "question": "who did I send money to last?" }
+```
+
+Returns Nova's answer. The `data.kind` field is the classification — one of `GREETING`, `BALANCE`, `LAST_RECIPIENT`, `SPENDING_SUMMARY`, `COUNTERPARTY_DETAILS`, `SPENDING_ADVICE`, `GENERAL_FINANCE`, `TRANSFER_INTENT`, `UNKNOWN`. The `data.answer` is Nova's natural-language reply. The `data.data` is the structured numbers behind the answer, or `null`.
+
+Nova answers questions about balance, spending, counterparties, and general money topics. She cannot execute a transfer from this endpoint — a "send X to Y" instruction returns kind `TRANSFER_INTENT` with a redirect reply pointing at the send flow.
+
+**Fail-soft:** unrecognized questions become `UNKNOWN` with a helpful fallback, never a 500. Only an unreachable Gemini or a Firestore failure on a data-backed kind returns an error.
+
+**Error codes for all three AI endpoints reuse existing values** (`VALIDATION_ERROR` for unparseable input or a stale recipient confirmation, `INTERNAL_ERROR` for a down AI provider) rather than introducing dedicated ones — don't assume codes like `INTENT_UNPARSEABLE` exist without checking `app/core/constants.py` first. See `docs/ai_implementation.md` for the full breakdown.
+
 ---
 
 ## 8. Phone Verification (Firebase Phone Auth)
@@ -663,7 +951,7 @@ Response:
 
 ## 10. Testing and Integration
 
-### 9.1 Swagger UI
+### 10.1 Swagger UI
 
 Open https://novabanq-api.onrender.com/docs to test endpoints manually.
 
@@ -671,7 +959,7 @@ Open https://novabanq-api.onrender.com/docs to test endpoints manually.
 2. Click **Authorize** (top right).
 3. Paste the token and confirm.
 
-### 9.2 Generate a test token from the terminal
+### 10.2 Generate a test token from the terminal
 
 ```bash
 curl -X POST "https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=YOUR_FIREBASE_WEB_API_KEY" \
@@ -697,9 +985,17 @@ Current scope is a hackathon build.
 | National ID verification | Not implemented | — |
 | KYC image hosting | Real | Selfies uploaded directly to Cloudinary by the client, deleted once verification completes |
 | Account numbers | Placeholder | 10-digit NovaBanq-internal numbers. Not real bank accounts — will be replaced with real NUBANs once virtual accounts go live via Flutterwave. |
-| Virtual accounts (Flutterwave) | Not yet implemented | — |
-| Ledger / transfer engine | Under construction | Planned for a future build |
-| Wallet balances | Under construction | Planned for a future build |
+| Double-entry ledger | Production-ready | Atomic Firestore transactions, per-currency balancing, idempotency keys |
+| Account balances | Production-ready | One account per user in their own currency |
+| Transfers | Production-ready | Quote + execute, 5-leg cross-currency settlement, PIN verification, idempotency |
+| Scheduled transfers | **Partially implemented** | Creating (`POST /transfers/scheduled`) and listing (`GET /transfers/scheduled`) are production-ready; the in-process scheduler (APScheduler) fires due transfers every 30 seconds and works correctly. **Fetch-one and cancel are routed but not backed by service logic yet — calling them fails server-side.** See Section 7.3. |
+| Transaction history | Production-ready | `GET /transactions`, `GET /transactions/{id}` |
+| Funding (virtual account) | **Mocked** | The `MockVirtualAccountProvider` generates account numbers deterministically. The real Flutterwave provider is a stub. |
+| Funding webhook | **Mocked** | Fired by the demo app instead of Flutterwave. In production, the real provider signs the request with `verif-hash` and the backend verifies it. |
+| Email notifications | Production-ready | Sent via Brevo: welcome, transfer sent/received, withdrawal confirmed, PIN lockout, funding received |
+| AI assistant (Nova) | Production-ready | Nine classification kinds, two Gemini calls per question, fail-soft discipline |
+| AI transfer parsing | Production-ready | Natural-language instructions become real transfers or schedules. Inherits the same fetch-one/cancel gap as plain scheduled transfers, since both go through the same underlying service. |
+| Real money movement | None | The platform is a closed-loop ledger. Deposits and withdrawals are the only rails that touch real money, and both are mocked for the demo. |
 
 ---
 
@@ -707,26 +1003,27 @@ Current scope is a hackathon build.
 
 ```text
 app/
-├── main.py                  FastAPI app initialization
+├── main.py                  FastAPI app initialization + in-process scheduler
 ├── api/                     Route aggregation and versioning
-├── core/                    Config, security handlers, exceptions
-├── infra/                   Third-party adapters (Firebase, Firestore, Brevo, Flutterwave)
+├── core/                    Config, security handlers, exceptions, shared utils
+├── infra/                   Third-party adapters (Firebase, Firestore, Brevo, Cloudinary, FxRatesAPI, virtual accounts)
 └── features/                Domain-driven feature modules
     ├── users/               Profile, identity claims, transaction PIN
     ├── otp/                 Email verification delivery
     ├── tags/                Unique @tag handles
     ├── account_numbers/     Account number generation
     ├── identity/            BVN + selfie KYC via Prembly, Cloudinary upload signing
-    ├── virtual_accounts/    Payment gateway bridge (Flutterwave sandbox)
-    ├── accounts/            Balances (planned)
-    ├── funding/             Inbound deposits (planned)
-    ├── currency/            FX calculations (planned)
-    ├── ledger/              Double-entry bookkeeping (planned)
-    ├── transfers/           Outbound transactions (planned)
-    └── transactions/        History and statements (planned)
+    ├── accounts/            Balances — one account per user
+    ├── ledger/              Double-entry bookkeeping engine
+    ├── currency/            FX rates and per-corridor fees
+    ├── transfers/           Quote, execute, scheduled transfers, AI-assisted parsing
+    ├── transactions/        History and receipts
+    ├── funding/             Virtual accounts + deposit webhook
+    ├── ai_intent/           Nova — the AI assistant and transfer parser
+    └── notifications/       Transactional email orchestration
 ```
 
-Each feature module has four layers:
+Each feature module has up to four layers:
 
 | File | Responsibility |
 | --- | --- |
@@ -734,6 +1031,8 @@ Each feature module has four layers:
 | `schemas.py` | Pydantic request/response models |
 | `service.py` | Business logic |
 | `repository.py` | Firestore access |
+
+Some modules have additional files where the domain warrants it — `transfers/` includes `executor.py`, `fee_calculator.py`, `validator.py`, `idempotency.py`, and the `scheduled_*` trio. `ai_intent/` includes the `ask_*` group for the conversational assistant.
 
 ---
 
@@ -777,3 +1076,6 @@ pytest tests/ -v -s
 
 * **API specs and contracts:** contact the primary backend engineer.
 * **Authentication platform:** check the project's Firebase Console settings.
+* **AI features (Nova, transfers, ask):** see `docs/ai_implementation.md` for the full technical reference.
+* **Full endpoint contract:** see `docs/api-contract.md` for detailed request/response shapes and error tables.
+* **Demo funding:** see `docs/demo-funding.md` for the deposit-simulation flow.
