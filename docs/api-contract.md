@@ -13,12 +13,12 @@ valid Firebase ID token in hand.
 
 **How to use this document:** Sections 1–3 are reference material you
 set up once (base URL, the response envelope, how errors are shaped)
-and rarely revisit after that. Sections 4–7 walk through each endpoint
+and rarely revisit after that. Sections 4–8 walk through each endpoint
 the mobile client actually calls, in the order you'll build the screens
-that use them. Section 8 is the one to keep open while you build the
-send-money flow — it stitches sections 5–7 together into the real,
+that use them. Section 9 is the one to keep open while you build the
+send-money flow — it stitches sections 5 and 7 together into the real,
 moment-by-moment sequence, including the two behaviors that are easiest
-to get wrong (idempotency and quote expiry). Sections 9–10 are lookup
+to get wrong (idempotency and quote expiry). Sections 10–11 are lookup
 tables you'll come back to repeatedly rather than read start to finish:
 how to format money correctly, and what every error code means.
 
@@ -27,15 +27,25 @@ how to format money correctly, and what every error code means.
 ## ⚠️ Not Yet Confirmed — Read Before Building Against This
 
 Everything else in this document has been confirmed against the
-backend code. One thing is still genuinely open:
+backend code. Two things are still genuinely open:
 
-**`XOF`'s display symbol** (Section 9) — shown here as `CFA`. This is
+**`XOF`'s display symbol** (Section 10) — shown here as `CFA`. This is
 a product decision, not a technical one: confirm with the design lead
 whether `CFA`, `F CFA`, `₣`, or something else is correct before
-shipping it. Whichever symbol you land on, put it behind a single
-`symbolFor(Currency)` function (see Section 9) rather than hardcoding
-it at each call site, so changing it later is a one-line fix instead
-of a find-and-replace across the app.
+shipping it. The backend's own internal formatting (used in receipts
+and emails, not in API responses) picks `"CFA "` with a trailing
+space — a useful data point for the design lead, but not necessarily
+the final answer for the app's UI. Whichever symbol you land on, put
+it behind a single `symbolFor(Currency)` function (see Section 10)
+rather than hardcoding it at each call site, so changing it later is a
+one-line fix instead of a find-and-replace across the app.
+
+**`balance_display`'s formatting** (Section 4) — this revision states
+the backend now includes thousands separators server-side. Confirm
+this against the current `GET /accounts/me` response before relying on
+it — if an earlier build of the app was written against a version
+without separators, re-verify live rather than assuming this doc is
+ahead of the backend.
 
 ---
 
@@ -48,9 +58,10 @@ of a find-and-replace across the app.
 5. [Transfers — Quote](#5-transfers--quote)
 6. [Funding — Depositing Money](#6-funding--depositing-money)
 7. [Transfers — Execute](#7-transfers--execute)
-8. [The Complete Transfer Flow](#8-the-complete-transfer-flow)
-9. [Formatting Amounts for Display](#9-formatting-amounts-for-display)
-10. [Error Code Reference](#10-error-code-reference)
+8. [Transfers — Scheduled](#8-transfers--scheduled)
+9. [The Complete Transfer Flow](#9-the-complete-transfer-flow)
+10. [Formatting Amounts for Display](#10-formatting-amounts-for-display)
+11. [Error Code Reference](#11-error-code-reference)
 
 ---
 
@@ -150,7 +161,7 @@ See the auth guide for token handling and the refresh-on-401 pattern.
 | 422 | Business rule violated, or validation failed | Show field errors or a specific message |
 | 429 | Rate-limited or locked (e.g. PIN lockout) | Show a wait message; back off |
 | 500 | Server error | Log the request id if present; retry once |
-| 502 | Upstream provider failed (FX, KYC, email, funding) | Show "try again later" |
+| 502 | Upstream provider failed (FX, KYC, email, funding, ledger) | Show "try again later" |
 
 ### Validation errors (422)
 
@@ -214,8 +225,8 @@ Authorization: Bearer <token>
 | Field | Type | Notes |
 |---|---|---|
 | `currency` | string | One of `NGN`, `GHS`, `KES`, `XOF`, `ZAR`. Fixed at account creation; never changes. |
-| `balance_minor` | integer | Balance in **minor units** of the currency. Never a float. See [Formatting Amounts](#9-formatting-amounts-for-display). |
-| `balance_display` | string | Same amount, pre-formatted by the backend with **thousands separators already included** and the currency's standard decimal places (e.g. `"57,134.11"` for NGN, `"1,250"` for XOF). **Display this directly and do not run it through your own grouping logic** — it already has commas; re-grouping it yourself will produce garbled output. It does **not** include a currency symbol — prepend that at the widget layer. For NGN, GHS, KES, and ZAR it has two decimal places; for XOF it has zero. |
+| `balance_minor` | integer | Balance in **minor units** of the currency. Never a float. See [Formatting Amounts](#10-formatting-amounts-for-display). |
+| `balance_display` | string | Same amount, pre-formatted by the backend with **thousands separators already included** and the currency's standard decimal places (e.g. `"57,134.11"` for NGN, `"1,250"` for XOF). **Display this directly and do not run it through your own grouping logic** — it already has commas; re-grouping it yourself will produce garbled output. It does **not** include a currency symbol — prepend that at the widget layer. For NGN, GHS, KES, and ZAR it has two decimal places; for XOF it has zero. **Verify this against a live response before shipping** — see the notice at the top of this document. |
 | `updated_at` | ISO 8601 timestamp | When the balance last changed. |
 
 **Pagination:** none — a user has one account.
@@ -307,7 +318,7 @@ profile. A client cannot state its own currency.
 | Status | Code | Meaning |
 |---|---|---|
 | 404 | `RECIPIENT_NOT_FOUND` | The tag resolves to no user. |
-| 404 | `USER_NOT_FOUND` | The sender has no profile. Shouldn't happen for an authenticated request — every valid token belongs to an onboarded user — but documented for completeness, same as `ACCOUNT_NOT_FOUND` in Section 4. |
+| 404 | `USER_NOT_FOUND` | The sender has no profile. Shouldn't happen for an authenticated request — every valid token belongs to an onboarded user — but documented for completeness, same as `ACCOUNT_NOT_FOUND` in Section 11's Accounts subsection. |
 | 422 | `SELF_TRANSFER` | Sender and recipient are the same user. |
 | 422 | `VALIDATION_ERROR` | Bad request body. See `details.fields`. |
 | 422 | `CORRIDOR_UNSUPPORTED` | No FX corridor for the currency pair. |
@@ -459,14 +470,20 @@ Content-Type: application/json
 |---|---|---|
 | 401 | `AUTH_INVALID` | `verif-hash` header missing or wrong. Only enforced when the real Flutterwave provider is active; skipped for the mock. |
 | 422 | `VALIDATION_ERROR` | Body doesn't match the expected shape. |
+| 502 | `INTERNAL_ERROR` | Firestore or ledger failure while crediting an otherwise-valid, successfully-verified deposit. Rare — most rejections are the well-formed-but-invalid cases below, which return 200, not this. |
 
 **Note on HTTP status:** the webhook returns **200 for every well-formed
-event**, whether the deposit was credited, was a duplicate, or was
-rejected for a data-integrity reason (unknown ref, stale ref, currency
-mismatch). Only a signature failure returns 401. This is deliberate —
-Flutterwave retries non-2xx responses, and a corrupt payload will never
-become valid on retry. Rejected-but-well-formed events are logged at
-`CRITICAL` on the backend for monitoring.
+event that isn't blocked by infrastructure failure**, whether the
+deposit was credited, was a duplicate, or was rejected for a
+data-integrity reason (unknown ref, stale ref, currency mismatch). Only
+a signature failure (401) or an infrastructure failure while crediting
+(502, see above) returns a non-200. This is deliberate — Flutterwave
+retries non-2xx responses, and a corrupt payload will never become
+valid on retry, so those are answered with 200 and `credited: false`
+instead. A genuine infrastructure failure, by contrast, *might* succeed
+on retry, so it's answered with 502 to trigger Flutterwave's retry
+behavior. Rejected-but-well-formed events are logged at `CRITICAL` on
+the backend for monitoring either way.
 
 ### How the demo works
 
@@ -665,7 +682,191 @@ will fail the same way unless you fix the request first.
 
 ---
 
-## 8. The Complete Transfer Flow
+## 8. Transfers — Scheduled
+
+A scheduled transfer is created now, at a future `execute_at` time. The
+PIN is verified **at scheduling time** — not when it actually fires. A
+background scheduler process polls for due transfers and fires each one
+through the same ledger path an immediate transfer uses. This section
+covers four routes; **two of them are not yet safe to build against —
+read the warning under each before wiring them up.**
+
+### `POST /transfers/scheduled`
+
+Create a scheduled transfer. **Fully functional.**
+
+**Request:**
+
+```
+POST /api/v1/transfers/scheduled
+Authorization: Bearer <token>
+Content-Type: application/json
+```
+
+```json
+{
+  "recipient_tag": "chidera.ng",
+  "amount_minor": 50000,
+  "idempotency_key": "01HZX9K3M4N5P6Q7R8S9T0U1V2",
+  "pin": "48392",
+  "execute_at": "2026-09-28T17:00:00.000Z"
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `recipient_tag` | string | yes | Same rules as `POST /transfers`. |
+| `amount_minor` | integer | yes | Same rules as `POST /transfers`. |
+| `idempotency_key` | string | yes | Same rules as Section 7 — unique per scheduling attempt, reused verbatim on retry. A retry with the same key returns the original schedule and does **not** consume a second PIN attempt. |
+| `pin` | string | yes | Verified now, at scheduling time. **Not re-verified when the transfer fires** — the schedule itself is the user's authorization for that future money movement. |
+| `execute_at` | string | yes | ISO 8601 UTC timestamp. Must be in the future. Convert the user's local wall-clock time to UTC **before** sending — the backend does no timezone inference on this field; it takes the timestamp exactly as given. |
+
+**Response (201):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "scheduled_transfer_id": "8f2e1a90-4c3b-4d2a-9f1e-6b7c8d9e0f1a",
+    "recipient_tag": "chidera.ng",
+    "recipient_display_name": "Temi Adeyemi",
+    "amount_minor": 50000,
+    "sender_currency": "GHS",
+    "execute_at": "2026-09-28T17:00:00.000Z",
+    "status": "PENDING",
+    "transaction_id": null,
+    "failure_reason": null,
+    "created_at": "2026-09-28T15:00:00.000Z"
+  },
+  "error": null
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `scheduled_transfer_id` | string | The schedule's own identifier. Distinct from `transaction_id`, which only exists once the transfer actually fires. |
+| `recipient_tag` | string | Normalized tag. |
+| `recipient_display_name` | string \| null | Resolved recipient name at the time of the response. `null` if the recipient can no longer be resolved (e.g. deleted account) — don't treat `null` here as an error. |
+| `amount_minor` | integer | In the sender's currency. |
+| `sender_currency` | string | The sender's currency at scheduling time. |
+| `execute_at` | ISO 8601 timestamp | Echo of what you sent, in UTC. |
+| `status` | string | One of `PENDING`, `SETTLED`, `FAILED`, `CANCELLED`. Always `PENDING` on creation. |
+| `transaction_id` | string \| null | Set once the transfer fires and settles. `null` until then, and `null` forever if it ends as `FAILED` or `CANCELLED` — a failed or cancelled schedule never produces a ledger transaction. |
+| `failure_reason` | string \| null | Set only when `status` is `FAILED`. See the status lifecycle below for the possible values. |
+| `created_at` | ISO 8601 timestamp | When the schedule was created. |
+
+**Status lifecycle:**
+
+```
+PENDING  ──(scheduler fires it, settles)──▶ SETTLED   (transaction_id set)
+PENDING  ──(scheduler fires it, rejected)─▶ FAILED     (failure_reason set)
+PENDING  ──(user cancels)─────────────────▶ CANCELLED
+```
+
+`failure_reason` is a string, not a fixed `ErrorCode` — the scheduler
+records whatever the underlying transfer attempt failed with (e.g.
+`INSUFFICIENT_BALANCE`, `RECIPIENT_NOT_FOUND` — the same codes from
+Section 7's error table), **plus one scheduler-specific value not in
+that table:** `SCHEDULED_TRANSFER_EXPIRED`. This fires when the
+scheduler was down (deploy, crash, paused) and comes back to find a
+transfer whose `execute_at` passed more than a few minutes ago — rather
+than firing it late and surprising the user, the backend marks it
+failed with this reason. Show a distinct message for it (e.g. "This
+was scheduled too long ago to send automatically — please send it
+directly") rather than folding it into the same generic language you
+use for `INSUFFICIENT_BALANCE`.
+
+**Errors:**
+
+| Status | Code | Meaning |
+|---|---|---|
+| 404 | `RECIPIENT_NOT_FOUND` | Tag resolves to no user. Checked at scheduling time as a fast-fail — the same check runs again when the transfer fires. |
+| 404 | `USER_NOT_FOUND` | Sender has no profile. |
+| 422 | `SELF_TRANSFER` | Sender is the recipient. |
+| 422 | `AMOUNT_INVALID` | Amount below minimum or malformed. |
+| 422 | `CORRIDOR_UNSUPPORTED` | No FX corridor for the pair. |
+| 422 | `VALIDATION_ERROR` | Body invalid — including a non-future `execute_at`. See `details.fields`. |
+| 422 | `PIN_INVALID` | Wrong PIN. Counts against the lockout, same as immediate transfer. |
+| 429 | `PIN_LOCKED` | Too many wrong PINs. |
+
+### `GET /transfers/scheduled`
+
+List the caller's scheduled transfers, newest first. **Fully
+functional.**
+
+**Request:**
+
+```
+GET /api/v1/transfers/scheduled
+Authorization: Bearer <token>
+```
+
+**Response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      { "...": "same shape as the create response above" }
+    ]
+  },
+  "error": null
+}
+```
+
+Includes past (terminal) schedules as well as pending ones — filter on
+`status == "PENDING"` client-side for an "upcoming transfers" view.
+
+### `GET /transfers/scheduled/{scheduled_transfer_id}`
+
+> ## ⚠️ Not yet functional — do not build against this today
+>
+> This route is registered and reachable, but the service function it
+> calls is not implemented on the backend as of this writing. Calling
+> it will fail server-side (a 500, not a clean 404). **Confirm with the
+> backend engineer that this has been implemented before wiring up a
+> "view schedule details" screen against it.** Until then, the list
+> endpoint above already returns the full object for every schedule —
+> you likely don't need this route at all for a v1 build; filter the
+> list response for the one you want instead of fetching it
+> individually.
+
+**Intended behavior**, once implemented: fetch a single scheduled
+transfer the caller owns.
+
+| Status | Code | Meaning |
+|---|---|---|
+| 404 | `SCHEDULED_TRANSFER_NOT_FOUND` | Unknown id, **or** the id exists but belongs to a different user — deliberately indistinguishable from "doesn't exist," so the endpoint can't be used to enumerate other users' schedules. |
+
+### `POST /transfers/scheduled/{scheduled_transfer_id}/cancel`
+
+> ## ⚠️ Not yet functional — do not build against this today
+>
+> Same situation as the endpoint above: routed, but the backend
+> function it depends on isn't implemented yet. **Do not ship a
+> "cancel" button against this endpoint until the backend engineer
+> confirms it works.** A user who taps "cancel" and gets a 500 with no
+> explanation is a worse experience than not offering cancellation at
+> all in this build.
+
+**Intended behavior**, once implemented: cancel a `PENDING` schedule.
+Only `PENDING` schedules can be cancelled.
+
+| Status | Code | Meaning |
+|---|---|---|
+| 404 | `SCHEDULED_TRANSFER_NOT_FOUND` | Unknown id, or not owned by the caller. |
+| 409 | *(exact code unconfirmed)* | Intended for "this schedule already fired/failed/was cancelled — no longer `PENDING`." **The specific `error.code` value for this case has not been confirmed against the backend source** — this codebase's established pattern is to reuse an existing code rather than mint a new one (e.g. `VALIDATION_ERROR` is reused this way elsewhere at a 409 status for an unrelated conflict), so don't assume a dedicated `SCHEDULED_TRANSFER_*`-style code exists for this without checking. |
+
+If a cancel and the scheduler's fire race each other, whichever reaches
+the backend first wins — the loser gets a deterministic outcome (either
+the 409 above, or a successful cancel with the fire recorded as an
+anomaly server-side). This is expected, not a bug, if you see it during
+testing.
+
+---
+
+## 9. The Complete Transfer Flow
 
 ```
  1. User opens the "Send" screen
@@ -684,6 +885,12 @@ will fail the same way unless you fix the request first.
 12. → On 5xx or timeout: retry the request (up to ~3 times) with the
      SAME idempotency_key
 ```
+
+This diagram covers the **immediate** path only. The scheduled path
+(Section 8) follows the same quote → confirm → PIN shape, but calls
+`POST /transfers/scheduled` in the last step instead, and doesn't
+resolve into a receipt immediately — it resolves into a `PENDING`
+schedule that settles later.
 
 ### Handling `expires_at`
 
@@ -718,7 +925,7 @@ duplicate-detection event.
 
 ---
 
-## 9. Formatting Amounts for Display
+## 10. Formatting Amounts for Display
 
 **All amounts in every API request and response are integers in the
 currency's minor units.** Never floats, never strings-as-numbers.
@@ -768,7 +975,7 @@ entirely the client's responsibility.
 | NGN | ₦ | |
 | GHS | GH₵ | |
 | KES | KSh | |
-| XOF | CFA | West African CFA franc. If the product uses a different convention (F CFA, ₣), use that instead — and use it consistently across every screen. |
+| XOF | CFA | West African CFA franc. The backend's own internal formatting uses `"CFA "` with a trailing space. If the product uses a different convention (F CFA, ₣), use that instead — and use it consistently across every screen. |
 | ZAR | R | |
 
 **Recommendation:** put this mapping in one Dart file
@@ -778,7 +985,7 @@ their mind about XOF, you change one line.
 
 ---
 
-## 10. Error Code Reference
+## 11. Error Code Reference
 
 Every code the transfers, funding, and accounts endpoints can return.
 Switch on these strings — never on HTTP status alone, and never on the
@@ -786,9 +993,9 @@ message.
 
 ### Transfers
 
-Covers both `POST /transfers/quote` and `POST /transfers` — not every
-endpoint returns every code below; see Section 5 and Section 7 for which codes apply
-to which one.
+Covers `POST /transfers/quote`, `POST /transfers`, and
+`POST /transfers/scheduled` — not every endpoint returns every code
+below; see Sections 5, 7, and 8 for which codes apply to which one.
 
 | Code | HTTP | Meaning | Suggested UX |
 |---|---|---|---|
@@ -800,7 +1007,7 @@ to which one.
 | `INSUFFICIENT_BALANCE` | 422 | Balance can't cover total debit | "You need X more to send this." |
 | `PIN_INVALID` | 422 | Wrong PIN (counts toward lockout) | "Incorrect PIN. N attempts remaining." |
 | `PIN_LOCKED` | 429 | Too many wrong attempts | "PIN locked. Try again in 20 minutes." |
-| `DUPLICATE_TRANSFER` | 409 | Key already used, original settled | Show the original receipt (see Section 8) |
+| `DUPLICATE_TRANSFER` | 409 | Key already used, original settled | Show the original receipt (see Section 9) |
 | `RATE_UNAVAILABLE` | 502 | FX provider unreachable, cache too stale | "Rate unavailable. Try again in a moment." (retry-able) |
 | `FX_PROVIDER_UNAVAILABLE` | 502 | FX provider rejected the request (auth/quota) | Same message to the user. Log it — the backend needs to see these. |
 | `VALIDATION_ERROR` | 422 | Request body invalid | Show `details.fields` inline |
@@ -814,6 +1021,16 @@ to which one.
 > down; `FX_PROVIDER_UNAVAILABLE` usually means our API key was
 > rejected or the account hit a quota. A spike in the latter is a real
 > incident and the backend team needs to know.
+
+### Scheduled transfers
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `SCHEDULED_TRANSFER_NOT_FOUND` | 404 | Unknown `scheduled_transfer_id`, or it belongs to a different user. Returned by the "fetch one" and "cancel" endpoints — **both currently non-functional server-side, see Section 8**. |
+
+`failure_reason` values recorded on a `FAILED` schedule are documented
+in Section 8, not here — they're plain strings on the schedule object,
+not `error.code` values from a rejected request.
 
 ### Funding
 
@@ -829,7 +1046,9 @@ to which one.
 > well-formed event, including ones that don't credit. If the deposit
 > didn't land, check `data.credited` in the response body, not the
 > HTTP status. Rejections (unknown ref, stale ref, currency mismatch)
-> are logged at `CRITICAL` on the backend.
+> are logged at `CRITICAL` on the backend. A 502 here specifically
+> means an infrastructure failure while crediting an otherwise-valid
+> event — see Section 6.
 
 ### Accounts
 
@@ -866,7 +1085,12 @@ to which one.
 ## Appendix — Full Endpoint Index
 
 For reference, every endpoint currently deployed. Endpoints marked
-**(planned)** are not yet available.
+**(planned)** haven't been started. Endpoints marked **(routed, not
+yet functional)** are wired into the router but call backend logic
+that isn't implemented yet — calling them today will error server-side.
+Don't confuse the two categories: a "planned" endpoint simply doesn't
+exist yet; a "routed, not yet functional" one exists, responds, and
+will fail.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -889,12 +1113,17 @@ For reference, every endpoint currently deployed. Endpoints marked
 | POST | `/api/v1/webhooks/flutterwave` | Receive deposit webhook |
 | POST | `/api/v1/transfers/quote` | Price a transfer |
 | POST | `/api/v1/transfers` | Execute a transfer |
+| POST | `/api/v1/transfers/scheduled` | Create a scheduled transfer |
+| GET | `/api/v1/transfers/scheduled` | List the caller's scheduled transfers |
+| GET | `/api/v1/transfers/scheduled/{id}` | Fetch a single scheduled transfer **(routed, not yet functional — see Section 8)** |
+| POST | `/api/v1/transfers/scheduled/{id}/cancel` | Cancel a pending scheduled transfer **(routed, not yet functional — see Section 8)** |
 | GET | `/api/v1/transactions` | List transaction history |
 | GET | `/api/v1/transactions/{transaction_id}` | Fetch a single transaction |
 | GET | `/api/v1/transfers/{transaction_id}` | Fetch a receipt **(planned — use `/transactions/{id}` for now)** |
 | POST | `/api/v1/withdrawals` | Withdraw to bank/mobile money **(planned)** |
 
-**That's 21 live endpoints and 2 planned ones.**
+**That's 23 fully live endpoints, 2 routed-but-not-yet-functional, and
+2 planned.**
 
 Note: the transactions endpoints are live and can be used today —
 `GET /api/v1/transactions/{transaction_id}` returns the same receipt
