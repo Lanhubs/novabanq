@@ -159,7 +159,13 @@ class _Classification:
     what resolves it, and an unresolvable value produces a friendly
     "not found" answer rather than an error. ``count`` is a positive
     integer when the user asked about a specific number of recent
-    transactions, otherwise None.
+    transactions, otherwise None. Currently only consumed by
+    ``_fetch_data``'s ``SPENDING_SUMMARY`` branch, which passes it
+    through to ``ask_repository.summarize_spending`` as ``limit`` —
+    other data-fetching kinds don't yet have a code path that honors
+    a requested count (``COUNTERPARTY_DETAILS``'s five-item cap, for
+    instance, is a fixed constant in the repository, not driven by
+    this field).
     """
 
     kind: AskKind

@@ -134,23 +134,39 @@ def get_last_outbound(uid: str) -> dict[str, Any] | None:
 # SPENDING_SUMMARY
 # ---------------------------------------------------------------------------
 
-def summarize_spending(uid: str, since: datetime) -> dict[str, Any]:
+def summarize_spending(
+    uid: str,
+    since: datetime,
+    *,
+    limit: int | None = None,
+) -> dict[str, Any]:
     """Aggregate the caller's outbound transfers since a timestamp.
 
     Args:
         uid: The authenticated caller's uid.
         since: The earliest ``created_at`` to include. UTC-aware.
+        limit: If given, caps aggregation to the ``limit`` most recent
+            matching transfers (applied after the ``since`` filter,
+            since ``list_for_sender`` already returns newest-first).
+            Answers "what were my last N transfers" when combined with
+            a period, or "what were my last N transfers, period" when
+            ``since`` is the "all_time" epoch. ``None`` or a
+            non-positive value means no cap beyond the function's own
+            fetch ceiling (see ``truncated`` below).
 
     Returns:
         A dict with ``total_minor`` (int, sum of ``from_amount_minor``),
         ``currency`` (str), ``total_display`` (str), ``count`` (int,
-        number of transfers), ``top_counterparties`` (list of
+        number of transfers actually aggregated — reflects ``limit``
+        when one was applied), ``top_counterparties`` (list of
         ``{tag, name, total_minor, total_display, count}``, sorted by
         total descending, up to 3), ``largest_minor`` (int) and
         ``largest_display`` (str), ``average_minor`` (int) and
-        ``average_display`` (str), and ``truncated`` (bool — True when
-        the fetch hit the cap and the totals are lower bounds, not
-        exact figures).
+        ``average_display`` (str), and ``truncated`` (bool — True only
+        when the initial fetch hit ``_MAX_TRANSACTIONS_PER_QUERY``, so
+        the totals may be lower bounds. An explicit ``limit`` does not
+        set this flag — a requested "last N" that returns exactly N is
+        the request being honored, not truncation).
     """
     docs = transactions_repository.list_for_sender(
         uid, limit=_MAX_TRANSACTIONS_PER_QUERY
@@ -167,6 +183,12 @@ def summarize_spending(uid: str, since: datetime) -> dict[str, Any]:
         and d.created_at is not None
         and d.created_at >= since
     ]
+
+    # list_for_sender returns newest-first, so slicing here keeps the
+    # most recent `limit` transfers within the period, not an
+    # arbitrary subset.
+    if limit is not None and limit > 0:
+        outbound = outbound[:limit]
 
     if not outbound:
         # No transfers in the period. Return a shape consistent with
