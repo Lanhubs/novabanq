@@ -58,7 +58,7 @@ class TransferErrorHandler {
       case 'DUPLICATE_TRANSFER':
         showSnack(
           'Transfer already submitted',
-          'This request may have settled. Check your balance before sending again.',
+          'This request settled. Open transaction history for its receipt before sending again.',
         );
         break;
       case 'RECIPIENT_NOT_FOUND':
@@ -86,7 +86,7 @@ class TransferErrorHandler {
     SnackBarHelper.showError(
       message: message,
       title: title,
-      position: SnackPosition.BOTTOM,
+      position: SnackPosition.TOP,
       duration: const Duration(seconds: 3),
     );
   }

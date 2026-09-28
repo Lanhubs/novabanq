@@ -8,7 +8,17 @@ class HomeTopBar extends StatelessWidget {
   final String? accountTag;
   final VoidCallback onNotificationTap;
   final VoidCallback onAddAccountTagTap;
-
+String getGreeting() {
+    final hour = DateTime.now().hour;
+    
+    if (hour < 12) {
+      return 'Good Morning';
+    } else if (hour < 17) {
+      return 'Good Afternoon';
+    } else {
+      return 'Good Evening';
+    }
+  }
   const HomeTopBar({
     super.key,
     required this.userName,
@@ -33,7 +43,7 @@ class HomeTopBar extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                'Good Morning $userName!',
+                '${getGreeting()} $userName!',
                 style: GoogleFonts.outfit(
                   fontSize: 16,
                   fontWeight: FontWeight.w700,

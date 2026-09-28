@@ -100,7 +100,7 @@ class ReceiveMoneyController extends GetxController {
     SnackBarHelper.showSuccess(
       message: message,
       title: 'Copied',
-      position: SnackPosition.BOTTOM,
+      position: SnackPosition.TOP,
       duration: const Duration(seconds: 2),
     );
   }

@@ -31,6 +31,8 @@ import 'package:novabanq/features/send/bindings/transfer_success_binding.dart';
 import 'package:novabanq/features/send/views/send_amount_screen.dart';
 import 'package:novabanq/features/send/views/send_money_screen.dart';
 import 'package:novabanq/features/send/views/transfer_success_screen.dart';
+import 'package:novabanq/features/transactions/views/transaction_detail_screen.dart';
+import 'package:novabanq/features/transactions/views/transaction_history_screen.dart';
 
 class AppPages {
   static List<GetPage> appPages = [
@@ -83,6 +85,15 @@ class AppPages {
       name: AppRoutes.receiveMoney,
       page: () => const ReceiveMoneyScreen(),
       binding: ReceiveMoneyBinding(),
+    ),
+    GetPage(
+      name: AppRoutes.transactionDetail,
+      page: () => const TransactionDetailScreen(),
+    ),
+    GetPage(
+      name: AppRoutes.transactions,
+      page: () => const TransactionHistoryScreen(),
+      binding: HomeBinding(),
     ),
     GetPage(
       name: AppRoutes.card,

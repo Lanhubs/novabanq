@@ -63,7 +63,7 @@ class TransferSuccessController extends GetxController {
     SnackBarHelper.showSuccess(
       message: 'Transaction ID copied to clipboard',
       title: 'Copied',
-      position: SnackPosition.BOTTOM,
+      position: SnackPosition.TOP,
       duration: const Duration(seconds: 2),
     );
   }

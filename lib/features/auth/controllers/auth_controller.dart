@@ -1,5 +1,6 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:novabanq/features/auth/models/password_rules.dart';
 import 'package:flutter/foundation.dart';
 import 'package:get/get.dart';
 import 'package:novabanq/app/routes/app_routes.dart';

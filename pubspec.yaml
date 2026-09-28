@@ -37,6 +37,7 @@ dependencies:
   get: ^4.7.3
   # flutter_local_notifications: ^22.3.1
   flutter_secure_storage: ^11.1.1
+  shared_preferences: ^2.5.5
   dio: ^5.11.1
   google_fonts: ^8.2.1
   hugeicons: any

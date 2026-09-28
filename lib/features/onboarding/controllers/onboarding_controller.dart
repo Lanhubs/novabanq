@@ -1,6 +1,7 @@
 import "package:flutter/widgets.dart";
 import "package:get/get.dart";
 import "package:novabanq/app/routes/app_routes.dart";
+import "package:novabanq/core/services/storage_service.dart";
 import "package:novabanq/features/auth/data/data/onboarding_detail.dart";
 
 class OnboardingController extends GetxController {
@@ -43,7 +44,8 @@ class OnboardingController extends GetxController {
     }
   }
 
-  void skipOnboarding() {
+  void skipOnboarding() async {
+    await StorageService.setIsFirstTimeUser(false);
     Get.offAndToNamed(AppRoutes.auth);
   }
 

@@ -10,6 +10,8 @@ class AppRoutes {
   static final sendAmount = "/send-amount";
   static final transferSuccess = "/transfer-success";
   static final receiveMoney = "/receive-money";
+  static final transactionDetail = "/transaction-detail";
+  static final transactions = "/transactions";
   static final card = "/card";
   static final cardDetails = "/card-details";
   static final cardControls = "/card-controls";

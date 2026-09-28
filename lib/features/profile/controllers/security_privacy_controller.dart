@@ -13,7 +13,7 @@ class SecurityPrivacyController extends GetxController {
     SnackBarHelper.showSuccess(
       message: value ? 'Biometric login enabled' : 'Biometric login disabled',
       title: 'Biometric Login',
-      position: SnackPosition.BOTTOM,
+      position: SnackPosition.TOP,
       duration: const Duration(seconds: 2),
     );
   }
@@ -26,7 +26,7 @@ class SecurityPrivacyController extends GetxController {
     SnackBarHelper.showInfo(
       message: 'Password reset link sent to your registered email address.',
       title: 'Account Password',
-      position: SnackPosition.BOTTOM,
+      position: SnackPosition.TOP,
       duration: const Duration(seconds: 2),
     );
   }
@@ -35,7 +35,7 @@ class SecurityPrivacyController extends GetxController {
     SnackBarHelper.showSuccess(
       message: 'Two-factor authentication is active and up to date.',
       title: 'SMS & Whatsapp Authentication',
-      position: SnackPosition.BOTTOM,
+      position: SnackPosition.TOP,
       duration: const Duration(seconds: 2),
     );
       

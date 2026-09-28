@@ -2,10 +2,13 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import 'package:novabanq/app/routes/app_routes.dart';
+import 'package:novabanq/core/network/transactions_api.dart';
 import 'package:novabanq/core/utils/helpers.dart';
+import 'package:novabanq/features/send/models/transaction_page.dart';
 import 'package:novabanq/core/network/api_client.dart';
 import 'package:novabanq/core/network/profile_api.dart';
 import 'package:novabanq/features/auth/controllers/auth_controller.dart';
+import 'dart:developer' as developer;
 
 class ProfileController extends GetxController {
   final userName = 'Toluwalase Daniel'.obs;
@@ -22,7 +25,10 @@ class ProfileController extends GetxController {
   final gender = 'Male'.obs;
 
   ProfileApi get profileApi => _profileApi ??= ProfileApi(ApiClient());
+  TransactionsApi get transactionsApi =>
+      _transactionsApi ??= TransactionsApi(ApiClient());
   ProfileApi? _profileApi;
+  TransactionsApi? _transactionsApi;
 
   @override
   void onInit() {
@@ -47,6 +53,12 @@ class ProfileController extends GetxController {
       final profileData = await profileApi.profile().catchError(
         (_) => <String, dynamic>{},
       );
+      final transactionsData = await transactionsApi
+          .getTransactions()
+          .catchError(
+            (_) => TransactionPage(items: const [], nextCursor: null),
+          );
+      developer.log('Transactions Data: $transactionsData');
       final fName = profileData['first_name']?.toString() ?? '';
       final lName = profileData['last_name']?.toString() ?? '';
       if (fName.isNotEmpty || lName.isNotEmpty) {
@@ -150,14 +162,14 @@ class ProfileController extends GetxController {
       SnackBarHelper.showSuccess(
         message: message,
         title: title,
-        position: SnackPosition.BOTTOM,
+        position: SnackPosition.TOP,
         duration: const Duration(seconds: 2),
       );
     } else {
       SnackBarHelper.showInfo(
         message: message,
         title: title,
-        position: SnackPosition.BOTTOM,
+        position: SnackPosition.TOP,
         duration: const Duration(seconds: 2),
       );
     }

@@ -12,6 +12,7 @@ class TransactionPinBottomSheet extends StatelessWidget {
   final VoidCallback? onClear;
   final VoidCallback onConfirm;
   final bool isLoading;
+  final bool isDisabled;
 
   const TransactionPinBottomSheet({
     super.key,
@@ -21,6 +22,7 @@ class TransactionPinBottomSheet extends StatelessWidget {
     this.onClear,
     required this.onConfirm,
     this.isLoading = false,
+    this.isDisabled = false,
   });
 
   @override
@@ -67,11 +69,7 @@ class TransactionPinBottomSheet extends StatelessWidget {
             // 5-Digit PIN Display
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20.0),
-              child: PinCodeDisplay(
-                pin: pin,
-                length: 5,
-                obscure: true,
-              ),
+              child: PinCodeDisplay(pin: pin, length: 5, obscure: true),
             ),
 
             const SizedBox(height: 20),
@@ -80,8 +78,16 @@ class TransactionPinBottomSheet extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20.0),
               child: AuthCtaButton(
-                text: isLoading ? 'Confirming...' : 'Confirm',
-                onPressed: isLoading ? () {} : onConfirm,
+                text: isLoading
+                    ? 'Confirming...'
+                    : isDisabled
+                    ? 'Close to check history'
+                    : 'Confirm',
+                onPressed: isLoading
+                    ? () {}
+                    : isDisabled
+                    ? () => Navigator.of(context).pop()
+                    : onConfirm,
               ),
             ),
 

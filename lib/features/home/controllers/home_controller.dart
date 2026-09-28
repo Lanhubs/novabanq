@@ -6,10 +6,14 @@ import 'package:novabanq/features/auth/controllers/auth_controller.dart';
 import 'package:novabanq/core/network/api_client.dart';
 import 'package:novabanq/core/network/profile_api.dart';
 import 'package:novabanq/core/network/transfer_api.dart';
+import 'package:novabanq/core/network/transactions_api.dart';
 import 'package:novabanq/core/services/firebase_bootstrap.dart';
+import 'package:novabanq/features/send/models/transaction_summary.dart';
 import '../models/home_country_currency.dart';
 import '../views/widgets/create_account_tag_bottom_sheet.dart';
 import '../views/widgets/create_account_tag_input_bottom_sheet.dart';
+
+part 'home_transactions_flow.dart';
 
 class HomeController extends GetxController {
   final isBalanceVisible = true.obs;
@@ -17,6 +21,14 @@ class HomeController extends GetxController {
   final profile = <String, dynamic>{}.obs;
   final isLoading = false.obs;
   final profileError = ''.obs;
+
+  // Transaction state management
+  final transactions = <TransactionSummary>[].obs;
+  final isTransactionsLoading = false.obs;
+  final transactionsError = ''.obs;
+  Future<void>? _transactionRequest;
+  int _loadedTransactionLimit = 0;
+
   String get accountNumber {
     final number = profile['account_number']?.toString() ?? '';
     return number.length == 10
@@ -38,6 +50,7 @@ class HomeController extends GetxController {
   void onReady() {
     super.onReady();
     loadAccount();
+    loadTransactions();
     loadProfile().then((_) {
       if (Get.arguments is Map &&
           (Get.arguments as Map)['fromSignUp'] == true &&
@@ -56,8 +69,31 @@ class HomeController extends GetxController {
           .where((item) => item.currencyCode == account.currency)
           .toList();
       if (matching.isNotEmpty) selectCountryCurrency(matching.first);
+    } on ApiFailure catch (failure) {
+      balanceAmount.value = '—';
+
+      // Show error feedback but don't block the UI
+      if (failure.status == 401) {
+        SnackBarHelper.showError(
+          title: 'Authentication Error',
+          message: 'Please log in again to view account balance.',
+          duration: const Duration(seconds: 3),
+        );
+      } else if (failure.status != null && failure.status! >= 500) {
+        SnackBarHelper.showWarning(
+          title: 'Service Unavailable',
+          message: 'Unable to load account balance. Please try again.',
+          duration: const Duration(seconds: 3),
+        );
+      }
     } catch (_) {
       balanceAmount.value = '—';
+
+      SnackBarHelper.showWarning(
+        title: 'Connection Error',
+        message: 'Unable to load account balance. Check your connection.',
+        duration: const Duration(seconds: 3),
+      );
     }
   }
 
@@ -122,7 +158,7 @@ class HomeController extends GetxController {
     SnackBarHelper.showSuccess(
       message: 'Account number copied to clipboard',
       title: 'Copied',
-      position: SnackPosition.BOTTOM,
+      position: SnackPosition.TOP,
       duration: const Duration(seconds: 2),
     );
   }
@@ -145,6 +181,8 @@ class HomeController extends GetxController {
       Get.toNamed(AppRoutes.sendMoney);
     } else if (action == 'Receive') {
       Get.toNamed(AppRoutes.receiveMoney);
+    } else if (action == 'Recent Transactions') {
+      Get.toNamed(AppRoutes.transactions);
     }
   }
 

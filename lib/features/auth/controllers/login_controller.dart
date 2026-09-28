@@ -67,7 +67,7 @@ class LoginController extends GetxController {
       SnackBarHelper.showSuccess(
         message: 'A password reset link has been sent.',
         title: 'Check your email',
-        position: SnackPosition.BOTTOM,
+        position: SnackPosition.TOP,
       );
     } on FirebaseAuthException catch (failure) {
       error.value = failure.message ?? 'Unable to send a reset link.';

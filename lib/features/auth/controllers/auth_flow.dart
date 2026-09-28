@@ -52,7 +52,7 @@ extension AuthFlow on AuthController {
       error.value = 'Firebase setup is required.';
       return;
     }
-    if (passwordController.text.length < 6 ||
+    if (!PasswordRules.isValid(passwordController.text) ||
         passwordController.text != confirmPasswordController.text) {
       error.value = 'Check your password and confirmation.';
       return;

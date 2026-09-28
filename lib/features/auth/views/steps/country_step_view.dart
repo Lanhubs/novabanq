@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:get/get.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:novabanq/app/routes/app_routes.dart';
+import 'package:novabanq/core/services/storage_service.dart';
 import 'package:novabanq/features/auth/models/country_item.dart';
 import 'package:novabanq/features/auth/views/widgets/auth_cta_button.dart';
 import 'package:novabanq/features/auth/views/widgets/country_selector.dart';
@@ -68,6 +71,35 @@ class CountryStepView extends StatelessWidget {
         AuthCtaButton(
           onPressed: onContinue,
           text: "Continue",
+        ),
+        const SizedBox(height: 16),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              "Already have an account?",
+              style: GoogleFonts.outfit(
+                fontSize: 12,
+                fontWeight: FontWeight.w400,
+                color: const Color(0xFF667085),
+              ),
+            ),
+            GestureDetector(
+              onTap: ()async {
+                Get.toNamed(AppRoutes.login); 
+                await StorageService.setIsFirstTimeUser(false);
+              },
+              child: Text(
+                "Login",
+                style: GoogleFonts.outfit(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w400,
+                  color: const Color(0xFF005100),
+                  decoration: TextDecoration.underline,
+                ),
+              ),
+            ),
+          ],
         ),
       ],
     );

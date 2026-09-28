@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:novabanq/core/utils/helpers.dart';
+import 'package:novabanq/core/network/api_client.dart';
+import 'package:novabanq/core/network/transactions_api.dart';
 import '../models/recent_transaction_item.dart';
 import '../views/widgets/select_corridor_bottom_sheet.dart';
 
@@ -10,6 +12,50 @@ class SendMoneyController extends GetxController {
   final selectedBank = ''.obs;
 
   final recentTransactions = <RecentTransactionItem>[].obs;
+  final isRecentLoading = false.obs;
+  final recentError = ''.obs;
+
+  @override
+  void onInit() {
+    super.onInit();
+    loadRecentTransactions();
+  }
+
+  Future<void> loadRecentTransactions() async {
+    if (isRecentLoading.value) return;
+    isRecentLoading.value = true;
+    recentError.value = '';
+    try {
+      final page = await TransactionsApi(
+        ApiClient(),
+      ).getTransactions(limit: 20);
+      final seen = <String>{};
+      recentTransactions.assignAll(
+        page.items
+            .where(
+              (item) =>
+                  item.transactionType == 'TRANSFER' &&
+                  item.direction == 'OUT' &&
+                  item.counterparty?.tag?.isNotEmpty == true,
+            )
+            .where((item) => seen.add(item.counterparty!.tag!))
+            .take(6)
+            .map(
+              (item) => RecentTransactionItem(
+                name: item.title,
+                subtitle: item.subtitle,
+                date: item.dateLabel,
+              ),
+            ),
+      );
+    } on ApiFailure catch (failure) {
+      recentError.value = failure.message;
+    } catch (_) {
+      recentError.value = 'Unable to load recent recipients.';
+    } finally {
+      isRecentLoading.value = false;
+    }
+  }
 
   bool get hasRecentTransactions => recentTransactions.isNotEmpty;
 

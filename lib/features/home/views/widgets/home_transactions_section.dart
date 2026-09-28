@@ -1,5 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:get/get.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:novabanq/features/home/controllers/home_controller.dart';
+import 'package:novabanq/features/home/views/widgets/empty_state.dart';
+import 'package:novabanq/features/home/views/widgets/error_state.dart';
+import 'package:novabanq/features/home/views/widgets/loading_state.dart';
+import 'package:novabanq/features/home/views/widgets/transactions_list.dart';
 
 class HomeTransactionsSection extends StatelessWidget {
   final VoidCallback? onSeeMoreTap;
@@ -8,6 +14,8 @@ class HomeTransactionsSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final controller = Get.find<HomeController>();
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -23,63 +31,54 @@ class HomeTransactionsSection extends StatelessWidget {
                 color: const Color(0xFF101828),
               ),
             ),
-            GestureDetector(
-              onTap: onSeeMoreTap,
-              child: Text(
-                'See more',
-                style: GoogleFonts.outfit(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w500,
-                  color: const Color(0xFF667085),
-                ),
-              ),
+            Obx(
+              () => controller.transactions.isNotEmpty
+                  ? GestureDetector(
+                      onTap: onSeeMoreTap,
+                      child: Text(
+                        'See more',
+                        style: GoogleFonts.outfit(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w500,
+                          color: const Color(0xFF667085),
+                        ),
+                      ),
+                    )
+                  : const SizedBox.shrink(),
             ),
           ],
         ),
 
         const SizedBox(height: 24),
 
-        // 2. Empty State View
-        Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Image.asset(
-                'assets/icons/coins.png',
-                width: 116,
-                height: 92,
-                fit: BoxFit.contain,
-              ),
+        // 2. Dynamic Content based on state
+        Obx(() {
+          // Loading state
+          if (controller.isTransactionsLoading.value &&
+              controller.transactions.isEmpty) {
+            return const LoadingState();
+          }
 
-              const SizedBox(height: 14),
+          // Error state (only if no transactions loaded)
+          if (controller.transactionsError.value.isNotEmpty &&
+              controller.transactions.isEmpty) {
+            return const ErrorState();
+          }
 
-              // "No transactions yet"
-              Text(
-                'No transactions yet',
-                style: GoogleFonts.outfit(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w700,
-                  color: const Color(0xFF101828),
-                ),
-              ),
+          // Empty state (no transactions available)
+          if (controller.transactions.isEmpty) {
+            return const EmptyState();
+          }
 
-              const SizedBox(height: 6),
-
-              // Description
-              Text(
-                'You have not perform any transaction,\nyour transaction sessions will show here',
-                style: GoogleFonts.outfit(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w400,
-                  color: const Color(0xFF667085),
-                  height: 1.45,
-                ),
-                textAlign: TextAlign.center,
-              ),
-            ],
-          ),
-        ),
+          // Transactions loaded - show list
+          return TransactionsList(controller: controller);
+        }),
       ],
     );
   }
-}
+
+ 
+
+ 
+  
+  }

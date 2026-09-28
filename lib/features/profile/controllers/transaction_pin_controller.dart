@@ -59,7 +59,7 @@ class TransactionPinController extends GetxController {
       SnackBarHelper.showError(
         message: 'New pin and confirmation do not match. Please try again.',
         title: 'PIN Mismatch',
-        position: SnackPosition.BOTTOM,
+        position: SnackPosition.TOP,
         duration: const Duration(seconds: 2),
       );
       return;
@@ -69,7 +69,7 @@ class TransactionPinController extends GetxController {
     SnackBarHelper.showSuccess(
       message: 'Your transaction pin has been changed successfully.',
       title: 'PIN Updated',
-      position: SnackPosition.BOTTOM,
+      position: SnackPosition.TOP,
       duration: const Duration(seconds: 2),
     );
   }
@@ -78,7 +78,7 @@ class TransactionPinController extends GetxController {
     SnackBarHelper.showInfo(
       message: 'A reset link has been sent to your registered email.',
       title: 'Forgot PIN',
-      position: SnackPosition.BOTTOM,
+      position: SnackPosition.TOP,
       duration: const Duration(seconds: 2),
     );
   }

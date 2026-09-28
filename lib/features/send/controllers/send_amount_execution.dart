@@ -32,6 +32,7 @@ extension SendAmountExecution on SendAmountController {
       transactionPin.value = '';
       if (Get.isRegistered<HomeController>()) {
         Get.find<HomeController>().loadAccount();
+        Get.find<HomeController>().refreshTransactions();
       }
       Get.back();
       Get.off(

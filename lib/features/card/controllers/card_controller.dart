@@ -66,14 +66,14 @@ class CardController extends GetxController {
       SnackBarHelper.showWarning(
         message: 'Your virtual card has been temporarily frozen.',
         title: 'Card Frozen',
-        position: SnackPosition.BOTTOM,
+        position: SnackPosition.TOP,
         duration: const Duration(seconds: 2),
       );
     } else {
       SnackBarHelper.showSuccess(
         message: 'Your virtual card is now active.',
         title: 'Card Unfrozen',
-        position: SnackPosition.BOTTOM,
+        position: SnackPosition.TOP,
         duration: const Duration(seconds: 2),
       );
     }
@@ -118,7 +118,7 @@ class CardController extends GetxController {
     SnackBarHelper.showInfo(
       message: 'Virtual black card feature is coming soon!',
       title: 'Black Card',
-      position: SnackPosition.BOTTOM,
+      position: SnackPosition.TOP,
       duration: const Duration(seconds: 2),
     );
   }
@@ -127,7 +127,7 @@ class CardController extends GetxController {
     SnackBarHelper.showInfo(
       message: 'Displaying all recent card transactions.',
       title: 'Transactions',
-      position: SnackPosition.BOTTOM,
+      position: SnackPosition.TOP,
       duration: const Duration(seconds: 2),
     );
   }
@@ -137,7 +137,7 @@ class CardController extends GetxController {
     SnackBarHelper.showSuccess(
       message: message,
       title: 'Copied',
-      position: SnackPosition.BOTTOM,
+      position: SnackPosition.TOP,
       duration: const Duration(seconds: 2),
     );
   }

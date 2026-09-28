@@ -11,6 +11,8 @@ class ConfirmTransactionBottomSheet extends StatelessWidget {
   final String amountToBeneficiary;
   final String fee;
   final VoidCallback onConfirm;
+  final String? scheduleAt;
+  final String confirmText;
 
   const ConfirmTransactionBottomSheet({
     super.key,
@@ -20,6 +22,8 @@ class ConfirmTransactionBottomSheet extends StatelessWidget {
     required this.amountToBeneficiary,
     required this.fee,
     required this.onConfirm,
+    this.scheduleAt,
+    this.confirmText = 'Confirm',
   });
 
   @override
@@ -77,11 +81,16 @@ class ConfirmTransactionBottomSheet extends StatelessWidget {
                 label: 'Amount to beneficiary',
                 value: amountToBeneficiary,
               ),
+              if (scheduleAt != null)
+                TransactionDetailRow(
+                  label: 'Scheduled for',
+                  value: scheduleAt!,
+                ),
 
               const SizedBox(height: 28),
 
               // Confirm CTA Button
-              AuthCtaButton(text: 'Confirm', onPressed: onConfirm),
+              AuthCtaButton(text: confirmText, onPressed: onConfirm),
             ],
           ),
         ),

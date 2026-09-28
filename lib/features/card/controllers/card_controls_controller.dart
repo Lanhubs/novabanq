@@ -31,7 +31,7 @@ class CardControlsController extends GetxController {
     SnackBarHelper.showSuccess(
       message: isEnabled ? '$title enabled' : '$title disabled',
       title: title,
-      position: SnackPosition.BOTTOM,
+      position: SnackPosition.TOP,
       duration: const Duration(seconds: 2),
     );
   }

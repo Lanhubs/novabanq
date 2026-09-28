@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:novabanq/features/auth/views/widgets/auth_cta_button.dart';
 import 'package:novabanq/features/auth/views/widgets/auth_text_field.dart';
+import 'package:novabanq/features/auth/models/password_rules.dart';
+import 'package:novabanq/features/auth/views/widgets/password_requirement_row.dart';
 
 class PasswordStepView extends StatelessWidget {
   final TextEditingController passwordController;
@@ -11,6 +13,10 @@ class PasswordStepView extends StatelessWidget {
   final VoidCallback onTogglePasswordVisibility;
   final VoidCallback onToggleConfirmPasswordVisibility;
   final VoidCallback onContinue;
+  final TextEditingController? currentPasswordController;
+  final bool isCurrentPasswordVisible;
+  final VoidCallback? onToggleCurrentPasswordVisibility;
+  final bool isSubmitting;
 
   const PasswordStepView({
     super.key,
@@ -21,6 +27,10 @@ class PasswordStepView extends StatelessWidget {
     required this.onTogglePasswordVisibility,
     required this.onToggleConfirmPasswordVisibility,
     required this.onContinue,
+    this.currentPasswordController,
+    this.isCurrentPasswordVisible = false,
+    this.onToggleCurrentPasswordVisibility,
+    this.isSubmitting = false,
   });
 
   @override
@@ -53,6 +63,22 @@ class PasswordStepView extends StatelessWidget {
         ),
 
         const SizedBox(height: 20),
+
+        if (currentPasswordController != null) ...[
+          AuthTextField(
+            controller: currentPasswordController,
+            label: 'Current password',
+            hintText: 'Enter your current password',
+            obscureText: !isCurrentPasswordVisible,
+            suffixIcon: IconButton(
+              icon: Icon(isCurrentPasswordVisible
+                  ? Icons.visibility_rounded : Icons.visibility_off_rounded,
+                size: 20, color: const Color(0xFF667085)),
+              onPressed: onToggleCurrentPasswordVisibility,
+            ),
+          ),
+          const SizedBox(height: 16),
+        ],
 
         // Password Field
         AuthTextField(
@@ -95,55 +121,34 @@ class PasswordStepView extends StatelessWidget {
         const SizedBox(height: 14),
 
         // Password Requirements list matching the screenshot
-        const _PasswordRequirementRow(
-          text: "Password should contain 8-10 characters",
-        ),
-        const SizedBox(height: 8),
-        const _PasswordRequirementRow(
-          text: "Password should contain at least one character",
-        ),
-        const SizedBox(height: 8),
-        const _PasswordRequirementRow(
-          text: "Password should contain at least one number",
+        ValueListenableBuilder<TextEditingValue>(
+          valueListenable: passwordController,
+          builder: (context, value, _) => Column(
+            children: [
+              PasswordRequirementRow(
+                text: 'Password should contain 8-10 characters',
+                isMet: PasswordRules.hasValidLength(value.text),
+              ),
+              const SizedBox(height: 8),
+              PasswordRequirementRow(
+                text: 'Password should contain at least one letter',
+                isMet: PasswordRules.hasLetter(value.text),
+              ),
+              const SizedBox(height: 8),
+              PasswordRequirementRow(
+                text: 'Password should contain at least one number',
+                isMet: PasswordRules.hasNumber(value.text),
+              ),
+            ],
+          ),
         ),
 
         const SizedBox(height: 24),
 
         // Continue Button
         AuthCtaButton(
-          onPressed: onContinue,
-          text: "Continue",
-        ),
-      ],
-    );
-  }
-}
-
-class _PasswordRequirementRow extends StatelessWidget {
-  final String text;
-
-  const _PasswordRequirementRow({required this.text});
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.center,
-      children: [
-        const Icon(
-          Icons.info_outline_rounded,
-          size: 16,
-          color: Color(0xFF667085),
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Text(
-            text,
-            style: GoogleFonts.outfit(
-              fontSize: 12.5,
-              fontWeight: FontWeight.w400,
-              color: const Color(0xFF667085),
-            ),
-          ),
+          onPressed: isSubmitting ? () {} : onContinue,
+          text: isSubmitting ? 'Saving...' : 'Continue',
         ),
       ],
     );

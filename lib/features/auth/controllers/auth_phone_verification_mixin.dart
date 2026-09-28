@@ -53,7 +53,7 @@ mixin AuthPhoneVerificationMixin on GetxController {
     SnackBarHelper.showSuccess(
       message: 'A new 5-digit verification code has been sent.',
       title: 'Code Sent',
-      position: SnackPosition.BOTTOM,
+      position: SnackPosition.TOP,
       duration: const Duration(seconds: 2),
     );
   }

@@ -7,6 +7,8 @@ import 'widgets/recipient_account_card.dart';
 import 'widgets/recent_transactions_section.dart';
 import 'widgets/send_money_empty_state.dart';
 import 'widgets/send_money_top_bar.dart';
+import 'widgets/send_recent_error_state.dart';
+import 'package:novabanq/features/home/views/widgets/loading_state.dart';
 
 class SendMoneyScreen extends GetView<SendMoneyController> {
   const SendMoneyScreen({super.key});
@@ -47,7 +49,7 @@ class SendMoneyScreen extends GetView<SendMoneyController> {
                               SnackBarHelper.showInfo(
                                 message: 'Bank selection list coming soon.',
                                 title: 'Select Bank',
-                                position: SnackPosition.BOTTOM,
+                                position: SnackPosition.TOP,
                               );
                             },
                           ),
@@ -57,7 +59,17 @@ class SendMoneyScreen extends GetView<SendMoneyController> {
 
                         // 3. Recent Transactions or Empty State
                         Obx(
-                          () => controller.hasRecentTransactions
+                          () =>
+                              controller.isRecentLoading.value &&
+                                  !controller.hasRecentTransactions
+                              ? const LoadingState()
+                              : controller.recentError.value.isNotEmpty &&
+                                    !controller.hasRecentTransactions
+                              ? SendRecentErrorState(
+                                  message: controller.recentError.value,
+                                  onRetry: controller.loadRecentTransactions,
+                                )
+                              : controller.hasRecentTransactions
                               ? RecentTransactionsSection(
                                   items: controller.recentTransactions,
                                   onSelect: controller.selectRecipient,
