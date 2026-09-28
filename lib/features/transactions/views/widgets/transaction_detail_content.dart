@@ -16,14 +16,12 @@ class TransactionDetailContent extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(24),
+      padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-
-          
           TransactionDetailStatus(transaction: transaction),
-          const SizedBox(height: 24),
+          const SizedBox(height: 22),
           TransactionDetailInfo(transaction: transaction, onCopyId: onCopyId),
         ],
       ),

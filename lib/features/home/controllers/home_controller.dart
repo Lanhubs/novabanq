@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import 'package:novabanq/app/routes/app_routes.dart';
@@ -16,6 +18,8 @@ import '../views/widgets/create_account_tag_input_bottom_sheet.dart';
 part 'home_transactions_flow.dart';
 
 class HomeController extends GetxController {
+  static const _pollInterval = Duration(seconds: 15);
+
   final isBalanceVisible = true.obs;
   final currentNavIndex = 0.obs;
   final profile = <String, dynamic>{}.obs;
@@ -28,6 +32,8 @@ class HomeController extends GetxController {
   final transactionsError = ''.obs;
   Future<void>? _transactionRequest;
   int _loadedTransactionLimit = 0;
+  Timer? _pollingTimer;
+  bool _isPollingRefresh = false;
 
   String get accountNumber {
     final number = profile['account_number']?.toString() ?? '';
@@ -37,7 +43,9 @@ class HomeController extends GetxController {
   }
 
   final balanceAmount = '—'.obs;
+  final isBalanceLoading = true.obs;
   final accountTag = ''.obs;
+  bool _hasCompletedInitialAccountLoad = false;
 
   // Selected country & currency
   final selectedCountryCurrency = kHomeSupportedCurrencies.first.obs;
@@ -51,6 +59,9 @@ class HomeController extends GetxController {
     super.onReady();
     loadAccount();
     loadTransactions();
+    _pollingTimer ??= Timer.periodic(_pollInterval, (_) {
+      unawaited(_pollAccountAndTransactions());
+    });
     loadProfile().then((_) {
       if (Get.arguments is Map &&
           (Get.arguments as Map)['fromSignUp'] == true &&
@@ -61,7 +72,27 @@ class HomeController extends GetxController {
     });
   }
 
+  Future<void> _pollAccountAndTransactions() async {
+    if (_isPollingRefresh) return;
+    _isPollingRefresh = true;
+    try {
+      await Future.wait([loadAccount(), refreshTransactions()]);
+    } finally {
+      _isPollingRefresh = false;
+    }
+  }
+
+  @override
+  void onClose() {
+    _pollingTimer?.cancel();
+    _pollingTimer = null;
+    super.onClose();
+  }
+
   Future<void> loadAccount() async {
+    if (!_hasCompletedInitialAccountLoad) {
+      isBalanceLoading.value = true;
+    }
     try {
       final account = await TransferApi(ApiClient()).getAccount();
       balanceAmount.value = account.balanceDisplay;
@@ -94,6 +125,9 @@ class HomeController extends GetxController {
         message: 'Unable to load account balance. Check your connection.',
         duration: const Duration(seconds: 3),
       );
+    } finally {
+      _hasCompletedInitialAccountLoad = true;
+      isBalanceLoading.value = false;
     }
   }
 

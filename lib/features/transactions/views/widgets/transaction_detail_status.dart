@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:novabanq/features/send/models/transaction_summary.dart';
 import 'transaction_status_badge.dart';
-import 'transaction_status_icon.dart';
 
 class TransactionDetailStatus extends StatelessWidget {
   final TransactionSummary transaction;
@@ -12,42 +11,72 @@ class TransactionDetailStatus extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final status = transaction.status.toUpperCase();
-    final colors = switch (status) {
-      'SETTLED' ||
-      'COMPLETED' ||
-      'SUCCESS' => const [Color(0xFF027A48), Color(0xFF05603A)],
-      'PENDING' => const [Color(0xFFF79009), Color(0xFFDC6803)],
-      'FAILED' || 'CANCELLED' => const [Color(0xFFD92D20), Color(0xFFB42318)],
-      _ => const [Color(0xFF344054), Color(0xFF1D2939)],
+    final recipient =
+        transaction.counterparty?.tag
+                ?.replaceFirst('@', '')
+                .trim()
+                .isNotEmpty ==
+            true
+        ? transaction.counterparty!.tag!.replaceFirst('@', '')
+        : transaction.title;
+    final direction = transaction.isIncoming ? 'From' : 'To';
+    final message = switch (status) {
+      'SETTLED' || 'COMPLETED' || 'SUCCESS' =>
+        'This transfer has been completed successfully. If the recipient has not received the funds, contact support.',
+      'PENDING' => 'This transfer is still processing.',
+      'FAILED' => 'This transfer was not completed.',
+      'CANCELLED' => 'This transfer was cancelled.',
+      _ => 'Transaction status: ${transaction.status}.',
     };
-    return SizedBox(
-     
-      child: Column(
-        children: [
-          TransactionStatusIcon(status: status),
-          const SizedBox(height: 16),
-          Text(
-            transaction.displayAmount,
+
+    return Column(
+      children: [
+        Image.asset(
+          'assets/icons/novabanq.png',
+          width: 94,
+          height: 34,
+          fit: BoxFit.contain,
+        ),
+        const SizedBox(height: 18),
+        Text(
+          '$direction $recipient',
+          textAlign: TextAlign.center,
+          style: GoogleFonts.outfit(
+            fontSize: 14,
+            fontWeight: FontWeight.w500,
+            color: const Color(0xFF475467),
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          transaction.displayAmount,
+          textAlign: TextAlign.center,
+          style: GoogleFonts.outfit(
+            fontSize: 32,
+            fontWeight: FontWeight.w700,
+            color: const Color(0xFF101828),
+          ),
+        ),
+        const SizedBox(height: 8),
+        TransactionStatusBadge(status: status),
+        const SizedBox(height: 16),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: BoxDecoration(
+            color: const Color(0xFFF2F4F7),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Text(
+            message,
             style: GoogleFonts.outfit(
-              fontSize: 32,
-              fontWeight: FontWeight.w700,
-              color: Colors.white,
+              fontSize: 12,
+              height: 1.45,
+              color: const Color(0xFF475467),
             ),
           ),
-          const SizedBox(height: 8),
-          Text(
-            transaction.title,
-            textAlign: TextAlign.center,
-            style: GoogleFonts.outfit(
-              fontSize: 16,
-              fontWeight: FontWeight.w500,
-              color: Colors.white.withValues(alpha: 0.9),
-            ),
-          ),
-          const SizedBox(height: 12),
-          TransactionStatusBadge(status: status),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }

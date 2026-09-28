@@ -1,8 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:novabanq/core/utils/currency_symbols.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:novabanq/features/send/models/transaction_summary.dart';
 import 'info_row.dart';
-import 'section_title.dart';
 
 class TransactionDetailInfo extends StatelessWidget {
   final TransactionSummary transaction;
@@ -14,78 +13,65 @@ class TransactionDetailInfo extends StatelessWidget {
     required this.onCopyId,
   });
 
-  String _money(int? minor, String? currency) {
-    if (minor == null || currency == null) return '—';
-    return '${CurrencySymbols.symbolFor(currency)}${CurrencySymbols.formatMinor(minor, currency)}';
-  }
-
   @override
   Widget build(BuildContext context) {
     final t = transaction;
     final local = t.createdAt.toLocal();
+    final status = switch (t.status.toUpperCase()) {
+      'SETTLED' || 'COMPLETED' || 'SUCCESS' => 'Completed',
+      'PENDING' => 'Pending',
+      'FAILED' => 'Failed',
+      'CANCELLED' => 'Cancelled',
+      _ => t.status.replaceAll('_', ' '),
+    };
+    final statusColor = switch (t.status.toUpperCase()) {
+      'SETTLED' || 'COMPLETED' || 'SUCCESS' => const Color(0xFF067647),
+      'PENDING' => const Color(0xFFB54708),
+      'FAILED' || 'CANCELLED' => const Color(0xFFB42318),
+      _ => const Color(0xFF344054),
+    };
+    final type = t.transactionType
+        .replaceAll('_', ' ')
+        .split(' ')
+        .where((word) => word.isNotEmpty)
+        .map(
+          (word) =>
+              '${word[0].toUpperCase()}${word.substring(1).toLowerCase()}',
+        )
+        .join(' ');
     final time =
         '${local.hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')}';
     final party = t.counterparty;
-    return Container(
-      decoration: BoxDecoration(
-        color: const Color(0xFFF9FAFB),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFFE4E7EC)),
-      ),
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const SectionTitle(title: 'Transaction Information'),
-          const SizedBox(height: 16),
-          InfoRow('Transaction ID', t.transactionId, onCopy: onCopyId),
-          const Divider(color: Color(0xFFE4E7EC)),
-          InfoRow('Type', t.transactionType.toLowerCase()),
-          const Divider(color: Color(0xFFE4E7EC)),
-          InfoRow('Direction', t.isIncoming ? 'Incoming' : 'Outgoing'),
-          const Divider(color: Color(0xFFE4E7EC)),
-          InfoRow('Date', '${t.dateLabel} at $time'),
-          if (party != null) ...[
-            const SizedBox(height: 24),
-            const SectionTitle(title: 'Counterparty'),
-            const SizedBox(height: 16),
-            InfoRow(
-              'Name',
-              party.name?.isNotEmpty == true ? party.name! : party.uid,
-            ),
-            if (party.tag?.isNotEmpty == true)
-              InfoRow('Tag', '@${party.tag!.replaceFirst('@', '')}'),
-          ],
-          const SizedBox(height: 24),
-          const SectionTitle(title: 'Amount Details'),
-          const SizedBox(height: 16),
-          if (t.fromAmountMinor != null)
-            InfoRow(
-              'Sent',
-              _money(t.fromAmountMinor, t.fromCurrency),
-              highlight: !t.isIncoming,
-            ),
-          if (t.toAmountMinor != null)
-            InfoRow(
-              'Received',
-              _money(t.toAmountMinor, t.toCurrency),
-              highlight: t.isIncoming,
-              incoming: t.isIncoming,
-            ),
-          if (t.feeMinor > 0)
-            InfoRow('Fee', _money(t.feeMinor, t.fromCurrency)),
-          if (!t.isIncoming && t.fromAmountMinor != null)
-            InfoRow(
-              'Total debited',
-              _money(t.fromAmountMinor! + t.feeMinor, t.fromCurrency),
-            ),
-          if (t.rateScaled != null)
-            InfoRow(
-              'Rate',
-              '${t.rateScaled! ~/ 1000000}.${(t.rateScaled! % 1000000).toString().padLeft(6, '0')}',
-            ),
+    final partyName = party?.name?.isNotEmpty == true
+        ? party!.name!
+        : party?.tag?.isNotEmpty == true
+        ? '@${party!.tag!.replaceFirst('@', '')}'
+        : party?.uid;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Transaction details',
+          style: GoogleFonts.outfit(
+            fontSize: 15,
+            fontWeight: FontWeight.w600,
+            color: const Color(0xFF101828),
+          ),
+        ),
+        const SizedBox(height: 8),
+        InfoRow('Status', status, valueColor: statusColor),
+        const Divider(height: 1, color: Color(0xFFEAECF0)),
+        InfoRow('Transaction type', type.isEmpty ? '—' : type),
+        if (partyName?.isNotEmpty == true) ...[
+          const Divider(height: 1, color: Color(0xFFEAECF0)),
+          InfoRow(t.isIncoming ? 'From' : 'To', partyName!),
         ],
-      ),
+        const Divider(height: 1, color: Color(0xFFEAECF0)),
+        InfoRow('Date / time', '${t.dateLabel} at $time'),
+        const Divider(height: 1, color: Color(0xFFEAECF0)),
+        InfoRow('Transaction ID', t.transactionId, onCopy: onCopyId),
+      ],
     );
   }
 }

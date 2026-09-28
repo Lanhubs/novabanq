@@ -73,6 +73,7 @@ class HomeTabView extends GetView<HomeController> {
                               Obx(
                                 () => HomeBalanceSection(
                                   balance: controller.balanceAmount.value,
+                                  isLoading: controller.isBalanceLoading.value,
                                   currencyCode:
                                       controller.selectedCurrency.value,
                                   countryCode: controller.countryCode,

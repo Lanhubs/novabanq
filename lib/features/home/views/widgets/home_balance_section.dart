@@ -7,6 +7,7 @@ import 'home_currency_pill.dart';
 class HomeBalanceSection extends StatelessWidget {
   final String balance;
   final bool isVisible;
+  final bool isLoading;
   final String currencyCode;
   final String countryCode;
   final String currencySymbol;
@@ -17,6 +18,7 @@ class HomeBalanceSection extends StatelessWidget {
     super.key,
     required this.balance,
     required this.isVisible,
+    this.isLoading = false,
     required this.currencyCode,
     required this.countryCode,
     required this.currencySymbol,
@@ -58,15 +60,18 @@ class HomeBalanceSection extends StatelessWidget {
             ),
 
             // Amount or Masked dots
-            Text(
-              isVisible ? balance : '••••••',
-              style: GoogleFonts.outfit(
-                fontSize: 42,
-                fontWeight: FontWeight.w800,
-                color: const Color(0xFF101828),
-                letterSpacing: -1.2,
+            if (isLoading)
+              const _BalanceSkeleton()
+            else
+              Text(
+                isVisible ? balance : '••••••',
+                style: GoogleFonts.outfit(
+                  fontSize: 42,
+                  fontWeight: FontWeight.w800,
+                  color: const Color(0xFF101828),
+                  letterSpacing: -1.2,
+                ),
               ),
-            ),
 
             const SizedBox(width: 10),
 
@@ -88,6 +93,48 @@ class HomeBalanceSection extends StatelessWidget {
           ],
         ),
       ],
+    );
+  }
+}
+
+class _BalanceSkeleton extends StatefulWidget {
+  const _BalanceSkeleton();
+
+  @override
+  State<_BalanceSkeleton> createState() => _BalanceSkeletonState();
+}
+
+class _BalanceSkeletonState extends State<_BalanceSkeleton>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _pulse = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 850),
+  )..repeat(reverse: true);
+
+  @override
+  void dispose() {
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      label: 'Loading account balance',
+      liveRegion: true,
+      child: SizedBox(
+        width: 164,
+        height: 42,
+        child: FadeTransition(
+          opacity: _pulse.drive(Tween(begin: 0.4, end: 0.95)),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: const Color(0xFFE4E7EC),
+              borderRadius: BorderRadius.circular(8),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

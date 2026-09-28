@@ -7,6 +7,7 @@ class InfoRow extends StatelessWidget {
   final VoidCallback? onCopy;
   final bool highlight;
   final bool incoming;
+  final Color? valueColor;
 
   const InfoRow(
     this.label,
@@ -15,6 +16,7 @@ class InfoRow extends StatelessWidget {
     this.onCopy,
     this.highlight = false,
     this.incoming = false,
+    this.valueColor,
   });
 
   @override
@@ -39,9 +41,11 @@ class InfoRow extends StatelessWidget {
               style: GoogleFonts.outfit(
                 fontSize: 13,
                 fontWeight: highlight ? FontWeight.w600 : FontWeight.w500,
-                color: highlight && incoming
-                    ? const Color(0xFF027A48)
-                    : const Color(0xFF101828),
+                color:
+                    valueColor ??
+                    (highlight && incoming
+                        ? const Color(0xFF027A48)
+                        : const Color(0xFF101828)),
               ),
             ),
           ),

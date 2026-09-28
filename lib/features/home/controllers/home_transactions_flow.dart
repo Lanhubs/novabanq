@@ -42,5 +42,8 @@ extension HomeTransactionsFlow on HomeController {
     }
   }
 
-  Future<void> refreshTransactions() => loadTransactions(refresh: true);
+  Future<void> refreshTransactions() => loadTransactions(
+    limit: _loadedTransactionLimit > 0 ? _loadedTransactionLimit : 20,
+    refresh: true,
+  );
 }

@@ -9,6 +9,7 @@ import 'package:novabanq/features/home/controllers/nova_conversation_controller.
 import 'package:novabanq/features/home/controllers/nova_transfer_flow.dart';
 import 'ai_action_button.dart';
 import 'nova_message_bubble.dart';
+import 'nova_schedule_date_sheet.dart';
 
 class AiAgentSheet extends StatefulWidget {
   const AiAgentSheet({super.key});
@@ -37,10 +38,32 @@ class _AiAgentSheetState extends State<AiAgentSheet> {
     final message = input.text.trim();
     if (message.isEmpty) return;
     input.clear();
-    final preview = await conversation.submit(message);
+    var preview = await conversation.submit(message);
     if (!mounted) return;
+    _scrollToLatest();
+    if (preview != null &&
+        conversation.mode == NovaInputMode.schedule &&
+        !preview.isScheduled) {
+      final scheduleAt = await showModalBottomSheet<DateTime>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        backgroundColor: Colors.transparent,
+        builder: (sheetContext) => const NovaScheduleDateSheet(),
+      );
+      if (!mounted || scheduleAt == null) return;
+      preview = await conversation.submit(message, scheduleAt: scheduleAt);
+      if (!mounted) return;
+      _scrollToLatest();
+    }
+    if (preview != null) {
+      await NovaTransferFlow.confirm(context, preview, api, conversation);
+    }
+  }
+
+  void _scrollToLatest() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (scroll.hasClients) {
+      if (mounted && scroll.hasClients) {
         scroll.animateTo(
           scroll.position.maxScrollExtent,
           duration: const Duration(milliseconds: 180),
@@ -48,9 +71,6 @@ class _AiAgentSheetState extends State<AiAgentSheet> {
         );
       }
     });
-    if (preview != null) {
-      await NovaTransferFlow.confirm(context, preview, api, conversation);
-    }
   }
 
   @override

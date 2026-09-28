@@ -36,7 +36,10 @@ class NovaConversationController extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<NovaTransferPreview?> submit(String raw) async {
+  Future<NovaTransferPreview?> submit(
+    String raw, {
+    DateTime? scheduleAt,
+  }) async {
     final text = raw.trim();
     if (isBusy || text.isEmpty) return null;
     if (text.length > 500) {
@@ -49,7 +52,17 @@ class NovaConversationController extends ChangeNotifier {
       notifyListeners();
       return null;
     }
-    messages.add(NovaMessage(text, isUser: true));
+    final requestText = scheduleAt == null
+        ? text
+        : '$text at ${_scheduleTimestamp(scheduleAt)}';
+    messages.add(
+      NovaMessage(
+        scheduleAt == null
+            ? text
+            : 'Schedule for ${_scheduleLabel(scheduleAt)}',
+        isUser: true,
+      ),
+    );
     isBusy = true;
     notifyListeners();
     try {
@@ -58,15 +71,21 @@ class NovaConversationController extends ChangeNotifier {
         messages.add(NovaMessage(answer.answer));
         return null;
       }
-      final preview = await api.parseTransfer(text);
+      final preview = await api.parseTransfer(requestText);
       if (mode == NovaInputMode.schedule && !preview.isScheduled) {
+        if (scheduleAt != null) {
+          messages.add(
+            const NovaMessage(
+              'I could not confirm that date and time. Choose another future time.',
+              isError: true,
+            ),
+          );
+          return null;
+        }
         messages.add(
-          const NovaMessage(
-            'Include a future time to schedule this payment. No transfer was made.',
-            isError: true,
-          ),
+          const NovaMessage('Choose a future date and time for this payment.'),
         );
-        return null;
+        return preview;
       }
       final quote = preview.quote;
       if (quote.isExpired ||
@@ -104,6 +123,46 @@ class NovaConversationController extends ChangeNotifier {
       if (!_disposed) notifyListeners();
     }
     return null;
+  }
+
+  String _scheduleTimestamp(DateTime dateTime) {
+    final local = dateTime.toLocal();
+    final offset = local.timeZoneOffset;
+    final sign = offset.isNegative ? '-' : '+';
+    final offsetHours = offset.inHours.abs().toString().padLeft(2, '0');
+    final offsetMinutes = (offset.inMinutes.abs() % 60).toString().padLeft(
+      2,
+      '0',
+    );
+    return '${local.year.toString().padLeft(4, '0')}-'
+        '${local.month.toString().padLeft(2, '0')}-'
+        '${local.day.toString().padLeft(2, '0')}T'
+        '${local.hour.toString().padLeft(2, '0')}:'
+        '${local.minute.toString().padLeft(2, '0')}:00'
+        '$sign$offsetHours:$offsetMinutes';
+  }
+
+  String _scheduleLabel(DateTime dateTime) {
+    const months = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+    final local = dateTime.toLocal();
+    final hour = local.hour % 12 == 0 ? 12 : local.hour % 12;
+    final minute = local.minute.toString().padLeft(2, '0');
+    final period = local.hour < 12 ? 'AM' : 'PM';
+    return '${months[local.month - 1]} ${local.day}, ${local.year} '
+        'at $hour:$minute $period';
   }
 
   void report(String text, {bool isError = false}) {
