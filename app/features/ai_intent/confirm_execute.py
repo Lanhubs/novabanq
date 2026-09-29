@@ -47,6 +47,18 @@ Design decisions this module enforces:
       retry after the user taps "confirm" must not double-execute a
       real transfer.
 
+On the confirmation text:
+
+    ``build_transfer_intent_response`` returns a confirmation whose
+    ``answer_text`` is a *template* the caller can use as a fallback.
+    The caller (``ask_service.answer_question``) does not have to use
+    it — and by default does not, because it routes the confirmation
+    through the same ``_answer()`` Gemini call every other Nova reply
+    goes through, so the confirmation bubble sounds like Nova rather
+    than like a form letter. The template only fires when Gemini is
+    unreachable, so a Gemini outage does not turn a good transfer
+    into an error card.
+
 Shape conventions:
 
     ``TransferIntentConfirmation`` is a Pydantic model (frozen),
@@ -110,6 +122,11 @@ class TransferIntentConfirmation(BaseModel):
     step. Nothing downstream re-derives any of it from the user's
     original sentence.
 
+    ``answer_text`` is a template the caller *may* use as a fallback.
+    The default caller path routes the confirmation through Gemini so
+    the bubble sounds like Nova; when Gemini is unreachable, this
+    field carries the string the caller should show instead.
+
     Frozen — this is a read-only projection handed to the client.
     """
 
@@ -118,8 +135,9 @@ class TransferIntentConfirmation(BaseModel):
     answer_text: str = Field(
         ...,
         description=(
-            "The chat bubble text Nova shows when a transfer is "
-            "confirmable — already written for the user."
+            "Fallback chat bubble text — used only when the caller's "
+            "Gemini answer call is unreachable. When Gemini succeeds, "
+            "the caller uses Gemini's reply and this field is ignored."
         ),
     )
     recipient_tag: str = Field(
@@ -195,8 +213,9 @@ class TransferIntentOutcome:
           confirmation exists; the frontend should not prompt for a
           PIN.
         * ``confirmation`` — the parse succeeded. The frontend renders
-          the confirmation bubble and, on user confirm, opens the PIN
-          dialog and calls ``/ai/execute-transfer``.
+          the confirmation bubble (either Gemini's version, or the
+          template on a Gemini outage) and, on user confirm, opens
+          the PIN dialog and calls ``/ai/execute-transfer``.
     """
 
     help_message: str | None
@@ -266,7 +285,7 @@ def build_transfer_intent_response(
     quote = parsed.quote
     execute_at = parsed.intent.execute_at
 
-    answer_text = _render_confirmation_text(
+    fallback_text = _render_confirmation_text(
         first_name=first_name,
         quote=quote,
         execute_at=execute_at,
@@ -275,7 +294,7 @@ def build_transfer_intent_response(
     return TransferIntentOutcome(
         help_message=None,
         confirmation=TransferIntentConfirmation(
-            answer_text=answer_text,
+            answer_text=fallback_text,
             recipient_tag=quote.recipient.tag,
             recipient_display_name=quote.recipient.display_name,
             recipient_uid=quote.recipient.uid,
@@ -296,7 +315,13 @@ def _render_confirmation_text(
     quote,
     execute_at: datetime | None,
 ) -> str:
-    """Compose the chat bubble Nova shows when a transfer is confirmable."""
+    """Compose the fallback chat bubble for a transfer confirmation.
+
+    Used only when the caller's Gemini answer call is unreachable. On
+    the normal path, ``ask_service`` routes the confirmation through
+    the same ``_answer()`` call every other Nova reply uses, so the
+    bubble has Nova's voice instead of this template's.
+    """
     amount_display = format_amount(
         quote.send_amount_minor, quote.sender_currency
     )

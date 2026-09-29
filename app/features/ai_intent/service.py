@@ -53,6 +53,22 @@ The parse flow, in order:
        LLM timezone math is unreliable and this value schedules real
        money movement.
 
+Where the confirmation bubble comes from:
+
+    When ``/ai/ask`` classifies a message as ``TRANSFER_INTENT``,
+    ``ask_service.answer_question`` routes through
+    ``confirm_execute.build_transfer_intent_response`` to parse and
+    quote the transfer, and then through ``ask_service._answer`` to
+    write the confirmation bubble. The parse call happens here in
+    ``parse_transfer_intent`` (this module); the bubble call happens
+    in ``ask_service`` — the same Gemini call that writes every other
+    Nova reply. There is no template on the normal path; the template
+    in ``confirm_execute`` only fires when the bubble call is
+    unreachable. That keeps the confirmation voice consistent with
+    the rest of the conversation, and it means a Gemini outage
+    degrades the confirmation to a plain but correct string instead
+    of turning a good transfer into an error card.
+
 Timezone discipline:
     The conversion from local wall-clock to UTC happens here, not in
     the LLM. ``COUNTRY_TIMEZONE`` maps each country to a fixed-offset

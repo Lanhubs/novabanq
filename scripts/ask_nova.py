@@ -6,10 +6,11 @@ back. Type ``exit`` or ``quit`` to stop.
 
 When Nova recognizes a transfer intent (``data.action ==
 "confirm_transfer"``), the script mimics the Flutter app's flow:
-it prompts for the PIN (via ``getpass``, so the PIN never echoes to
-the terminal), calls ``POST /ai/execute-transfer`` with the
-structured fields, and prints the outcome. This makes the script a
-faithful end-to-end test of the chat-native transfer flow.
+it prompts for the PIN, calls ``POST /ai/execute-transfer`` with the
+structured fields, and prints the outcome. The PIN is typed in the
+clear on the terminal — this is a debug script, not the product, and
+masking it here would only complicate an already fragile interactive
+shell. The real product masks the PIN in the Flutter modal.
 
 Requires:
     * uvicorn running at http://127.0.0.1:8000
@@ -22,7 +23,6 @@ Run:
     python -m scripts.ask_nova
 """
 
-import getpass
 import os
 import uuid
 from typing import Any
@@ -46,8 +46,7 @@ def _sign_in(email: str, password: str, web_api_key: str) -> dict[str, str]:
 
     Raises:
         SystemExit: If sign-in fails, with Firebase's own error message
-            (e.g. ``EMAIL_NOT_FOUND``, ``INVALID_PASSWORD``) surfaced
-            directly, rather than a generic HTTP status.
+        surfaced directly, rather than a generic HTTP status.
     """
     try:
         r = httpx.post(
@@ -75,12 +74,7 @@ def _sign_in(email: str, password: str, web_api_key: str) -> dict[str, str]:
 
 
 def _wrap(text: str, indent: str = "    ", width: int = 74) -> None:
-    """Print text word-wrapped to the terminal width.
-
-    Simple whitespace-split wrap; good enough for terminal output and
-    doesn't need textwrap. Prints one line at a time with the given
-    indent prefix.
-    """
+    """Print text word-wrapped to the terminal width."""
     words = text.split()
     line = indent
     for word in words:
@@ -113,14 +107,7 @@ def _print_answer(body: dict[str, Any]) -> None:
 
 
 def _is_transfer_confirmation(body: dict[str, Any]) -> bool:
-    """True when the response is a transfer intent ready for a PIN.
-
-    The trigger is ``data.action == "confirm_transfer"`` — NOT
-    ``kind == "TRANSFER_INTENT"`` alone. A TRANSFER_INTENT reply with
-    a help message (e.g. "Please include an amount…") also has
-    ``kind: "TRANSFER_INTENT"`` but ``data: null``, and must not
-    trigger the PIN dialog.
-    """
+    """True when the response is a transfer intent ready for a PIN."""
     if not body.get("success"):
         return False
     data = body.get("data")
@@ -135,13 +122,7 @@ def _is_transfer_confirmation(body: dict[str, Any]) -> bool:
 
 
 def _print_transfer_result(body: dict[str, Any]) -> None:
-    """Pretty-print the /ai/execute-transfer response.
-
-    Handles both the success envelope (IMMEDIATE or SCHEDULED) and the
-    error envelope. The error envelope covers PIN_INVALID, PIN_LOCKED,
-    INSUFFICIENT_BALANCE, RECIPIENT_CHANGED, and every other
-    NovaBanqError that the endpoint can raise.
-    """
+    """Pretty-print the /ai/execute-transfer response."""
     if not body.get("success"):
         err = body.get("error", {})
         print(
@@ -182,21 +163,20 @@ def _confirm_and_execute(
 ) -> None:
     """Prompt for a PIN and execute the confirmed transfer.
 
-    Mirrors the Flutter flow: the PIN is collected through a dedicated
-    secure prompt (``getpass`` here), never typed as chat text. The
-    structured fields come straight from the intent block the backend
-    returned — the amount and recipient that settle are the amount and
-    recipient the user was shown.
+    Uses plain ``input()``, not ``getpass``. ``getpass`` on Windows
+    routes through ``msvcrt.getwch()`` and does not reliably receive
+    keystrokes under PowerShell or in terminals without a real console
+    attached — the prompt appears but typing is swallowed. Since this
+    is a debug script, echoing the PIN back is an acceptable cost for
+    input that actually works. The real product masks the PIN in the
+    Flutter modal, not here.
     """
     intent = body["data"]["data"]["intent"]
 
-    # Generate a fresh idempotency key for this attempt. A retry with
-    # the same key would return the original result; for the demo
-    # script, one key per attempt is fine.
     idempotency_key = f"ask-nova-{uuid.uuid4().hex}"
 
     try:
-        pin = getpass.getpass("PIN (hidden) > ").strip()
+        pin = input("PIN > ").strip()
     except (EOFError, KeyboardInterrupt):
         print("\n  Cancelled — no transfer was made.\n")
         return
@@ -283,9 +263,6 @@ def main() -> None:
 
             _print_answer(body)
 
-            # If this reply is a transfer confirmation, follow up with
-            # the PIN prompt and the execute call — the same flow the
-            # Flutter app runs. Otherwise just return to the prompt.
             if _is_transfer_confirmation(body):
                 _confirm_and_execute(c, headers, body)
 
