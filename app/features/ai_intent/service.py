@@ -5,19 +5,24 @@ intent and the quote needed to confirm it. The heavy lifting is a
 single Gemini call with a constrained response schema; everything
 else here is validation and conversion.
 
-Two public entry points, both starting from the same Gemini call:
+Two public entry points:
 
     * ``parse_transfer_intent(...)`` — parse only. Returns the
       structured intent plus the transfer quote for the frontend to
-      render a confirmation screen. Read-only.
+      render a confirmation screen. Read-only. Called by
+      ``/ai/parse-transfer`` and, indirectly, by
+      ``/ai/ask``'s ``TRANSFER_INTENT`` branch (via
+      ``confirm_execute.build_transfer_intent_response``).
 
-    * ``execute_transfer(...)`` — parse and execute in one shot.
-      Takes the user's text and their PIN, branches on whether the
-      text specified a future time, and either runs an immediate
-      transfer or creates a scheduled one. Returns a discriminated
-      union so the frontend knows which happened.
+    * ``execute_transfer(...)`` — execute a transfer from already-
+      confirmed fields. **Does not parse natural language and does not
+      call Gemini.** The frontend receives a confirmation payload from
+      ``/ai/ask`` or ``/ai/parse-transfer``, collects the user's PIN,
+      and sends the structured fields back here for settlement. See
+      ``ai_intent.confirm_execute`` for the full confirm/execute
+      contract and the reasoning behind it.
 
-The flow, in order:
+The parse flow, in order:
 
     1. Load the sender's profile (needed for country and currency).
     2. Call Gemini with the user's text, the response schema, and the
@@ -47,13 +52,6 @@ The flow, in order:
        time as text, and this service does the conversion, because
        LLM timezone math is unreliable and this value schedules real
        money movement.
-    7. Branch on the parsed intent:
-       - ``parse_transfer_intent`` calls ``transfers_service.quote``
-         and returns a ``ParseIntentResponse``.
-       - ``execute_transfer`` calls either
-         ``transfers_service.execute`` (immediate) or
-         ``scheduled_service.schedule`` (deferred), and returns an
-         ``ExecuteTransferPayload`` discriminated by ``kind``.
 
 Timezone discipline:
     The conversion from local wall-clock to UTC happens here, not in
@@ -82,18 +80,30 @@ Provider-resilience discipline:
     each model. See ``_GEMINI_MODEL_CHAIN`` and the retry schedule
     below ``_call_gemini`` for the exact policy.
 
-Import note:
-    The stdlib ``time`` module is imported as ``time_module`` because
-    ``from datetime import time`` shadows it in the local namespace.
-    Pylance correctly flags ``time.sleep(...)`` as an attribute error
-    under the shadowing; renaming the module import avoids the
-    collision entirely.
+Import notes:
+    * The stdlib ``time`` module is imported as ``time_module``
+      because ``from datetime import time`` shadows it in the local
+      namespace. Pylance correctly flags ``time.sleep(...)`` as an
+      attribute error under the shadowing; renaming the module import
+      avoids the collision entirely.
+
+    * ``AiExecuteTransferResult`` is imported from
+      ``execute_schemas`` — the HTTP boundary module that owns it.
+      That module has no imports from ``service`` or
+      ``confirm_execute``, so both can depend on it without a cycle.
+
+    * ``execute_confirmed_transfer`` is imported *inside*
+      ``execute_transfer``, not at module level. ``confirm_execute``
+      imports this module (as ``ai_intent_service``) at module level
+      for the parser; if we imported back at module level here, the
+      two modules would need each other fully defined before either
+      finished loading. The local import defers that edge to call
+      time, when both modules are fully loaded.
 """
 
 import logging
 import re
 import time as time_module
-import uuid
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -115,16 +125,12 @@ from app.core.constants import (
 from app.core.exceptions import NovaBanqError
 from app.core.utils import amount_to_minor
 from app.features.ai_intent.execute_schemas import (
-    ExecuteTransferPayload,
-    ImmediateTransferResult,
-    ScheduledTransferResult,
+    AiExecuteTransferResult,
 )
 from app.features.ai_intent.schemas import (
     ParseIntentResponse,
     ParsedIntent,
 )
-from app.features.tags import service as tags_service
-from app.features.transfers import scheduled_service
 from app.features.transfers import service as transfers_service
 from app.features.users import service as users_service
 
@@ -162,22 +168,6 @@ class IntentProviderUnavailableError(NovaBanqError):
     status_code = 502
     code = ErrorCode.INTERNAL_ERROR
     message = "The AI service is temporarily unavailable."
-
-
-class RecipientConfirmationMismatchError(NovaBanqError):
-    """Raised when a confirmed recipient uid doesn't match resolution.
-
-    Fires only when the request includes ``confirmed_recipient_uid``
-    and the tag resolves to a different uid. That means the user
-    confirmed a recipient that is no longer the recipient of that
-    tag — a rare event, but exactly the case the confirmation field
-    exists to catch. The frontend should refresh the recipient lookup
-    and ask the user to re-confirm.
-    """
-
-    status_code = 409
-    code = ErrorCode.VALIDATION_ERROR
-    message = "The recipient changed since you confirmed."
 
 
 # ---------------------------------------------------------------------------
@@ -351,124 +341,78 @@ def parse_transfer_intent(
 def execute_transfer(
     *,
     sender_uid: str,
-    text: str,
+    recipient_tag: str,
+    amount_minor: int,
+    confirmed_recipient_uid: str,
+    idempotency_key: str,
     pin: str,
-    confirmed_recipient_uid: str | None = None,
-) -> ExecuteTransferPayload:
-    """Parse a natural-language instruction and execute it.
+    execute_at: datetime | None = None,
+) -> AiExecuteTransferResult:
+    """Execute (or schedule) a transfer from already-confirmed fields.
 
-    The combined endpoint: parse the text, resolve the recipient, and
-    either execute an immediate transfer or create a scheduled one,
-    depending on whether the user specified a future time.
+    This function **does not parse natural language and does not call
+    Gemini.** The fields arrive pre-computed from a confirmation
+    payload the frontend already showed the user. That is the entire
+    point: the amount and recipient that settle are the amount and
+    recipient the user was shown, not a second independent parse of
+    the same sentence that could drift on model version rollover,
+    infra-level nondeterminism, or prompt-adjacent drift.
 
-    This is the endpoint the frontend calls when it wants a single
-    round trip. For the two-step flow — show the user the recipient
-    name first, then commit — the frontend calls
-    ``/ai/parse-transfer`` first, displays the name, and then calls
-    this endpoint with ``confirmed_recipient_uid`` set to the uid the
-    user actually confirmed. When that field is present, the service
-    re-resolves the tag and rejects the request if the resolution
-    differs from the confirmed uid — closing the gap between "what
-    the user saw" and "what actually executes" without a separate
-    token or session.
+    See ``ai_intent.confirm_execute`` for the full confirm/execute
+    contract.
 
     Args:
         sender_uid: The authenticated caller's uid.
-        text: The user's raw instruction.
-        pin: The PIN the user entered. Verified before any money
-            moves or any schedule is written.
-        confirmed_recipient_uid: Optional. When provided, the resolved
-            recipient's uid must equal this value.
+        recipient_tag: The recipient tag from the confirmation payload.
+        amount_minor: The amount in the sender's currency, minor
+            units, from the confirmation payload.
+        confirmed_recipient_uid: The recipient uid the frontend showed
+            the user. Re-verified against a fresh tag resolution by
+            ``execute_confirmed_transfer`` before any money moves.
+        idempotency_key: Client-generated unique key for this execute
+            attempt. Required. Same contract as every other
+            money-moving endpoint.
+        pin: The PIN collected in the frontend's confirmation modal.
+            Verified before any money moves.
+        execute_at: If set, the transfer is scheduled instead of
+            executed immediately. Null means immediate.
 
     Returns:
-        An ``ExecuteTransferPayload`` — either an
-        ``ImmediateTransferResult`` or a ``ScheduledTransferResult``,
-        discriminated by the ``kind`` field.
+        An ``AiExecuteTransferResult`` with either ``transfer`` (kind
+        IMMEDIATE) or ``scheduled_transfer`` (kind SCHEDULED) set.
 
     Raises:
-        IntentUnparseableError: If the text isn't a transfer request,
-            is missing a required field (recipient, amount), or the
-            user specified a time that couldn't be parsed.
-        IntentProviderUnavailableError: If Gemini is unreachable.
-        UserNotFoundError: If the sender has no profile.
-        RecipientNotFoundError: If the recipient tag resolves to no
-            user.
-        RecipientConfirmationMismatchError: If
-            ``confirmed_recipient_uid`` was provided and does not
-            match the resolved recipient.
-        SelfTransferError: If sender and recipient are the same user.
-        AmountBelowMinimumError: If the parsed amount is below the
-            platform minimum.
-        CorridorUnsupportedError: If the currency pair has no
-            corridor.
-        PinInvalidError: If the PIN does not match.
-        PinLockedError: If PIN entry is currently locked.
-        RateUnavailableError: If no trustworthy rate is available.
-        InsufficientBalanceError: If the sender's balance cannot
-            cover the total debit (immediate path only).
-        ScheduledTransferRepositoryError: On a Firestore failure in
-            the scheduled path.
-        LedgerRepositoryError: On a Firestore failure in the
-            immediate path.
+        RecipientChangedError: If the tag no longer resolves to
+            ``confirmed_recipient_uid``.
+        RecipientNotFoundError: If the tag no longer resolves to any
+            user at all.
+        PinInvalidError, PinLockedError: From the underlying
+            transfer/schedule call.
+        InsufficientBalanceError, AmountBelowMinimumError,
+        CorridorUnsupportedError, SelfTransferError: From the
+            underlying transfer/schedule call.
     """
-    sender_profile = users_service.get_profile(sender_uid)
-    country = Country(sender_profile["country"])
-    currency = Currency(sender_profile["currency"])
-
-    extraction = _call_gemini(text=text, country=country)
-
-    logger.info(
-        "Gemini extraction: action=%r amount=%r tag=%r execute_at=%r",
-        extraction.action,
-        extraction.amount_major,
-        extraction.recipient_tag,
-        extraction.execute_at_local,
+    # Imported locally to break the module-load cycle. ``confirm_execute``
+    # imports this module (as ``ai_intent_service``) at module level for
+    # the parser, so a module-level import of ``execute_confirmed_transfer``
+    # here would need ``confirm_execute`` fully defined before ``service``
+    # finished loading — and ``confirm_execute`` can't finish until
+    # ``service`` does. Deferring the import to call time breaks the
+    # cycle; by the time any code actually calls this function, both
+    # modules are fully loaded.
+    from app.features.ai_intent.confirm_execute import (
+        execute_confirmed_transfer,
     )
 
-    validated = _validate_and_convert_extraction(
-        extraction=extraction, currency=currency
-    )
-    amount_minor = amount_to_minor(validated.amount_decimal, currency)
-
-    # If the frontend confirmed a recipient, verify the resolution
-    # before doing anything else. This is the whole point of the
-    # optional field — the frontend showed the user a name, and the
-    # user committed to that specific recipient. Any drift between
-    # what was shown and what the tag now resolves to is rejected.
-    if confirmed_recipient_uid is not None:
-        resolved_uid = tags_service.resolve_uid(validated.recipient_tag)
-        if resolved_uid != confirmed_recipient_uid:
-            raise RecipientConfirmationMismatchError()
-
-    execute_at = _parse_execute_at_strict(
-        local_str=validated.execute_at_local,
-        country=country,
-    )
-
-    if execute_at is None:
-        # Immediate transfer. Execute through the standard path,
-        # which verifies the PIN and moves the money.
-        transfer_result = transfers_service.execute(
-            sender_uid=sender_uid,
-            recipient_tag=validated.recipient_tag,
-            send_amount_minor=amount_minor,
-            idempotency_key=_immediate_key(),
-            pin=pin,
-        )
-        return ImmediateTransferResult(transfer=transfer_result)
-
-    # Scheduled transfer. The PIN is verified here, at scheduling
-    # time; the scheduler will not re-verify it when the transfer
-    # eventually fires.
-    scheduled_result = scheduled_service.schedule(
+    return execute_confirmed_transfer(
         sender_uid=sender_uid,
-        recipient_tag=validated.recipient_tag,
+        recipient_tag=recipient_tag,
+        confirmed_recipient_uid=confirmed_recipient_uid,
         amount_minor=amount_minor,
-        idempotency_key=_scheduled_key(),
+        idempotency_key=idempotency_key,
         pin=pin,
         execute_at=execute_at,
     )
-    return ScheduledTransferResult(scheduled_transfer=scheduled_result)
 
 
 # ---------------------------------------------------------------------------
@@ -482,19 +426,13 @@ def _validate_and_convert_extraction(
 ) -> _ValidatedExtraction:
     """Run the shared post-Gemini validation and return a narrowed model.
 
-    Both ``parse_transfer_intent`` and ``execute_transfer`` need
-    exactly this: verify the extraction has an action, a recipient,
-    and an amount; convert the amount string to a Decimal; ensure it's
-    valid for the currency. Factored out so the two entry points can
-    never diverge on what counts as a valid extraction.
+    Factored out so the two parse entry points can never diverge on
+    what counts as a valid extraction.
 
     Returns a ``_ValidatedExtraction`` rather than a bare ``Decimal``
     so the required-but-still-nullable fields on ``_GeminiExtraction``
     (``recipient_tag``, ``amount_major``) are narrowed to their
-    proven-non-null forms in a way Pylance can follow. Without this,
-    every caller would need a redundant ``assert x is not None`` or a
-    ``# type: ignore`` after the checks — the caller would "know" the
-    guarantee was made, but the type checker would not.
+    proven-non-null forms in a way Pylance can follow.
 
     Args:
         extraction: The result of ``_call_gemini``.
@@ -558,28 +496,6 @@ def _validate_and_convert_extraction(
     )
 
 
-def _immediate_key() -> str:
-    """Fresh idempotency key for the immediate-transfer path.
-
-    A UUIDv4 wrapped in an ``ai-`` prefix for log legibility. Each
-    call gets a fresh key — two identical instructions from the same
-    user at different moments are two distinct transfers, and a
-    retry of a single call is protected by the client retrying with
-    the same key, not by the server deriving one deterministically.
-    """
-    return f"ai-{uuid.uuid4().hex}"
-
-
-def _scheduled_key() -> str:
-    """Fresh idempotency key for the scheduled-transfer path.
-
-    Same shape as ``_immediate_key``. The scheduled-transfer service
-    derives its Firestore document id from this key via UUIDv5, so
-    the key itself only needs to be unique and log-legible.
-    """
-    return f"ai-sched-{uuid.uuid4().hex}"
-
-
 # ---------------------------------------------------------------------------
 # Gemini call — with retry and model fallback
 # ---------------------------------------------------------------------------
@@ -612,23 +528,13 @@ def _call_gemini(*, text: str, country: Country) -> _GeminiExtraction:
     """Call Gemini and return the parsed extraction.
 
     Tries each model in ``_GEMINI_MODEL_CHAIN`` in order. For each
-    model, retries transient 5xx errors (503 UNAVAILABLE, 500 INTERNAL)
-    up to ``len(_GEMINI_RETRY_DELAYS_SECONDS) - 1`` extra times with
-    backoff. Non-transient errors (4xx — auth, quota, malformed
-    request) abort immediately; retrying them just wastes time.
+    model, retries transient 5xx errors up to
+    ``len(_GEMINI_RETRY_DELAYS_SECONDS) - 1`` extra times with
+    backoff. Non-transient errors (4xx) abort immediately; retrying
+    them just wastes time.
 
     Also treats an empty or schema-invalid response as a retry-worthy
-    failure: a model that returns garbage is no more useful than one
-    that 503'd, and the next model in the chain might do better.
-
-    If every model in the chain is exhausted, raises
-    ``IntentProviderUnavailableError``. The frontend shows a generic
-    retry message.
-
-    The model is configured with a response schema derived from
-    ``_GeminiExtraction``, so the response is constrained to the
-    expected JSON shape. The schema fields are all strings or nulls —
-    see ``_GeminiExtraction`` for why.
+    failure.
 
     Raises:
         IntentProviderUnavailableError: If no model in the chain
@@ -638,9 +544,7 @@ def _call_gemini(*, text: str, country: Country) -> _GeminiExtraction:
 
     # The configured model goes first if it isn't already in the
     # chain, so an operator who sets GEMINI_MODEL to a specific value
-    # overrides the built-in chain. If it's already in the chain, the
-    # chain's order wins (avoids calling the same model twice back to
-    # back).
+    # overrides the built-in chain.
     model_chain: tuple[str, ...]
     if configured_model_name in _GEMINI_MODEL_CHAIN:
         model_chain = _GEMINI_MODEL_CHAIN
@@ -673,9 +577,6 @@ def _call_gemini(*, text: str, country: Country) -> _GeminiExtraction:
                     ),
                 )
             except ServerError as exc:
-                # 5xx — transient. Log and fall through to the next
-                # attempt; if this was the last attempt for this
-                # model, the outer loop advances to the next model.
                 last_exception = exc
                 logger.warning(
                     "Gemini model=%s attempt=%d/%d failed with "
@@ -690,8 +591,6 @@ def _call_gemini(*, text: str, country: Country) -> _GeminiExtraction:
                 )
                 continue
             except ClientError as exc:
-                # 4xx — auth failure, quota exceeded, malformed
-                # request, unknown model. Retrying won't help.
                 logger.exception(
                     "Gemini call failed with non-retryable client "
                     "error on model=%s (status=%s).",
@@ -700,8 +599,6 @@ def _call_gemini(*, text: str, country: Country) -> _GeminiExtraction:
                 )
                 raise IntentProviderUnavailableError() from exc
             except Exception as exc:  # noqa: BLE001
-                # Anything else — network blip, SDK bug, timeout.
-                # Treat as transient and retry.
                 last_exception = exc
                 logger.warning(
                     "Gemini model=%s attempt=%d/%d raised unexpected "
@@ -748,7 +645,6 @@ def _call_gemini(*, text: str, country: Country) -> _GeminiExtraction:
                 )
                 continue
 
-    # Every model in the chain, on every retry, failed.
     logger.error(
         "All Gemini models exhausted: chain=%s. Last error: %s.",
         model_chain,
@@ -763,19 +659,6 @@ def _call_gemini(*, text: str, country: Country) -> _GeminiExtraction:
 
 def _parse_amount_decimal(raw: str) -> Decimal:
     """Convert Gemini's amount string to an exact Decimal.
-
-    Gemini is instructed to return a plain decimal string like
-    ``"5000"`` or ``"19.99"``. The schema constrains it, but
-    constraint is not a guarantee — a stray symbol or an empty string
-    can still arrive. This guard converts cleanly or raises a message
-    the user can act on.
-
-    ``is_finite()`` is checked before any comparison, exactly as
-    ``client.py`` and ``repository.py`` do for rates: an untrusted
-    ``Decimal`` can be ``Infinity`` (which passes a bare ``<= 0``
-    check silently) or ``NaN`` (whose ordering comparisons raise
-    ``InvalidOperation`` outside this function's own try/except if
-    left unguarded).
 
     Raises:
         IntentUnparseableError: If the string isn't a valid decimal,
@@ -799,20 +682,13 @@ def _parse_amount_decimal(raw: str) -> Decimal:
 
 
 # The parser is deliberately forgiving about the input formats
-# Gemini actually returns in practice. The naive version only handled
-# a bare "HH:MM" (optionally prefixed with "today"/"tomorrow") and
-# silently returned None on anything else, which caused scheduled
-# intents to fall through to immediate transfers whenever Gemini
-# returned something like "5pm" or "17.00".
+# Gemini actually returns in practice.
 #
 # Recognized shapes:
 #   * "HH:MM" and "HH:MM:SS"       -> time(hour, minute)
 #   * "HH.MM"                       -> time(hour, minute)
 #   * "Hpm" / "H:MMpm" / "H pm"     -> time(hour_24, minute)
 #   * "noon" / "midnight"           -> time(12, 0) / time(0, 0)
-#
-# The 12-hour forms are converted to 24-hour using the standard rule
-# (12am -> 00, 12pm -> 12, 1pm -> 13, etc.).
 
 _HHMM_RE = re.compile(r"^(\d{1,2}):(\d{2})(?::\d{2})?$")
 _HHMM_DOT_RE = re.compile(r"^(\d{1,2})\.(\d{2})$")
@@ -824,23 +700,16 @@ _NOON_MIDNIGHT_RE = re.compile(r"^(noon|midnight)$", re.IGNORECASE)
 
 
 def _coerce_time_token(token: str) -> time | None:
-    """Parse a bare time token (no day prefix) into a ``datetime.time``.
-
-    Returns ``None`` if the token doesn't match any known shape. The
-    caller decides whether a ``None`` here is fatal (it is, when the
-    user explicitly specified a time).
-    """
+    """Parse a bare time token (no day prefix) into a ``datetime.time``."""
     token = token.strip()
     if not token:
         return None
 
-    # "noon" / "midnight"
     match = _NOON_MIDNIGHT_RE.match(token)
     if match:
         word = match.group(1).lower()
         return time(12, 0) if word == "noon" else time(0, 0)
 
-    # "17:00" / "17:00:00"
     match = _HHMM_RE.match(token)
     if match:
         hour, minute = int(match.group(1)), int(match.group(2))
@@ -848,7 +717,6 @@ def _coerce_time_token(token: str) -> time | None:
             return time(hour, minute)
         return None
 
-    # "17.00"
     match = _HHMM_DOT_RE.match(token)
     if match:
         hour, minute = int(match.group(1)), int(match.group(2))
@@ -856,7 +724,6 @@ def _coerce_time_token(token: str) -> time | None:
             return time(hour, minute)
         return None
 
-    # "5pm" / "5:30pm" / "5 pm"
     match = _HHMM_AMPM_RE.match(token)
     if match:
         hour = int(match.group(1))
@@ -878,20 +745,7 @@ def _parse_execute_at_strict(
     local_str: str | None,
     country: Country,
 ) -> datetime | None:
-    """Parse a local wall-clock string into a UTC datetime, or raise.
-
-    Behaviour:
-      * ``local_str is None`` -> returns ``None`` (user asked for
-        immediate).
-      * ``local_str`` is non-null but unparseable -> raises
-        ``IntentUnparseableError``. This is the load-bearing change:
-        the user asked to defer, and we must not silently settle now.
-      * ``local_str`` is parseable -> returns the UTC datetime.
-
-    The "no country timezone" case also raises, because if we can't
-    even determine the user's timezone, deferring a money movement to
-    an unknown local time is unsafe.
-    """
+    """Parse a local wall-clock string into a UTC datetime, or raise."""
     if not local_str:
         return None
 
@@ -938,10 +792,6 @@ def _parse_execute_at_strict(
         now_local.date(), parsed_time, tzinfo=tz
     ) + timedelta(days=day_offset)
 
-    # Only apply the "nearest future occurrence" fallback when Gemini
-    # didn't state a day explicitly. An explicit "today 09:00" that has
-    # already passed is left as-is; the scheduled-transfer service's
-    # own validation will reject a past timestamp with the right error.
     if not explicit_day and target_local <= now_local:
         target_local += timedelta(days=1)
 

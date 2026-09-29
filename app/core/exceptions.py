@@ -101,6 +101,28 @@ class RecipientNotFoundError(NovaBanqError):
     message = "Recipient could not be found."
 
 
+class RecipientChangedError(NovaBanqError):
+    """Raised when a recipient tag no longer resolves to the uid the
+    user confirmed.
+
+    Fires when the AI transfer-intent flow's execute step re-resolves
+    the recipient tag and finds it now points to a different user — a
+    case that happens if the tag was released and re-claimed between
+    the confirmation shown to the user and the execute call. Refuses
+    rather than silently sending money to whoever holds the tag now.
+
+    The frontend should re-run the parse step (or the confirm screen)
+    so the user sees the current owner before re-confirming.
+    """
+
+    status_code = 409
+    code = ErrorCode.RECIPIENT_CHANGED
+    message = (
+        "This recipient's tag has changed since you confirmed. "
+        "Please review and try again."
+    )
+
+
 class SelfTransferError(NovaBanqError):
     status_code = 422
     code = ErrorCode.SELF_TRANSFER

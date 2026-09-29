@@ -7,10 +7,12 @@ Three endpoints:
       the frontend uses this to render a confirmation screen before
       committing.
 
-    * ``POST /ai/execute-transfer`` — parse and execute. Takes a
-      user's text and their PIN, and either runs an immediate transfer
-      or creates a scheduled one. Returns a discriminated union so the
-      frontend knows which happened without an extra round trip.
+    * ``POST /ai/execute-transfer`` — execute a transfer the user has
+      already confirmed. Takes the **structured fields** the frontend
+      received from a prior parse/ask call, plus the user's PIN and an
+      idempotency key. Does **not** re-parse natural language and does
+      **not** call Gemini — see ``ai_intent.confirm_execute``'s module
+      docstring for why.
 
     * ``POST /ai/ask`` — the financial assistant. Takes a
       plain-language question and returns an answer grounded in the
@@ -24,9 +26,9 @@ because the amount parsed from the user's text is in their currency,
 the timezone is theirs, and the data behind Nova's answers is scoped
 to them.
 
-The combined endpoint's request carries the PIN. It does not carry
-the PIN through Gemini — the PIN is passed as a separate field on the
-request and never enters the prompt or the model call. The service
+The execute endpoint's request carries the PIN. It does not carry the
+PIN through Gemini — the PIN is passed as a separate field on the
+request and never enters a prompt or a model call. The service
 verifies it against the sender's stored hash through the same
 ``users_service.verify_pin_for_uid`` path every other money-movement
 endpoint uses.
@@ -67,7 +69,7 @@ from app.features.ai_intent.ask_schemas import (
     AskResponse,
 )
 from app.features.ai_intent.execute_schemas import (
-    ExecuteTransferPayload,
+    AiExecuteTransferResult,
     ExecuteTransferRequest,
 )
 from app.features.ai_intent.schemas import (
@@ -92,17 +94,16 @@ def _ok(data: Any) -> dict[str, Any]:
         "returns the structured intent (amount, recipient, optional "
         "scheduled time) plus the full transfer quote. The frontend "
         "renders the confirmation screen from the quote, then calls "
-        "`POST /transfers` or `POST /transfers/scheduled` with the "
-        "fields from the response when the user confirms.\n\n"
+        "`POST /ai/execute-transfer` with the fields from the "
+        "response when the user confirms.\n\n"
         "The recipient is resolved here, so the confirmation screen "
         "can show the recipient's full name before the user commits — "
         "the entire point of surfacing the intent back to the user "
         "before any money moves.\n\n"
         "If `intent.execute_at` is non-null, the user asked for a "
-        "scheduled transfer. The immediate-transfer flow (`POST "
-        "/transfers`) ignores that field, so the frontend should "
-        "route scheduled intents to the scheduled-transfer endpoint "
-        "instead."
+        "scheduled transfer. The frontend passes that field through "
+        "to `/ai/execute-transfer` unchanged so the backend schedules "
+        "instead of settling immediately."
     ),
 )
 def parse_transfer_intent(
@@ -121,64 +122,65 @@ def parse_transfer_intent(
     "/ai/execute-transfer",
     response_model=dict[str, Any],
     status_code=201,
-    summary="Parse a natural-language instruction and execute it",
+    summary="Execute a transfer the user has already confirmed",
     description=(
-        "Parses the user's text, verifies their PIN, and executes the "
-        "transfer in a single call. If the text specifies a future "
-        "time, a scheduled transfer is created instead of an "
-        "immediate one. Returns **201 Created** on success — a new "
-        "transaction or schedule is always the result.\n\n"
+        "Executes (or schedules) a transfer from the structured "
+        "fields the frontend received from `/ai/ask` or "
+        "`/ai/parse-transfer`. Returns **201 Created** on success — "
+        "a new transaction or schedule is always the result.\n\n"
+        "**No re-parsing.** The request does not carry the user's "
+        "original sentence. It carries the exact fields the user was "
+        "shown on the confirmation screen, so the amount and "
+        "recipient that settle are the ones the user approved. The "
+        "backend does not call the language model at this endpoint.\n\n"
+        "**Required `confirmed_recipient_uid`.** The recipient tag "
+        "is re-resolved at execute time and the request is rejected "
+        "if it now points to a different user than the one provided. "
+        "That's the case where a tag was released and re-claimed "
+        "between the confirmation and the execute call.\n\n"
+        "**Required `idempotency_key`.** Client-generated, unique per "
+        "attempt. A retry after a dropped connection with the same "
+        "key returns the original result without settling twice.\n\n"
         "**Response shape.** The response's `data.kind` field "
         "discriminates between the two outcomes:\n\n"
         "  - `kind: \"IMMEDIATE\"` — the transfer settled. The full "
         "    `TransferResponse` is in `data.transfer`.\n"
         "  - `kind: \"SCHEDULED\"` — a schedule was created. The full "
         "    `ScheduledTransferResponse` is in `data.scheduled_transfer`.\n\n"
-        "**Optional recipient confirmation.** The request may include "
-        "`confirmed_recipient_uid`. When present, the tag is "
-        "re-resolved and the request is rejected if it resolves to a "
-        "different uid than the one provided. This lets a cautious "
-        "client do the two-step flow — call `POST /ai/parse-transfer` "
-        "first, show the recipient name, then call this endpoint with "
-        "the uid the user actually confirmed — while a fast-path "
-        "client omits the field and accepts the tag resolution at "
-        "execution time.\n\n"
         "**PIN.** The `pin` field is verified before any money moves "
         "or any schedule is written, using the same lockout policy as "
-        "every other money-movement endpoint. The PIN is never sent to "
-        "the language model — it's a separate request field that the "
-        "service handles directly."
+        "every other money-movement endpoint. The PIN is never sent "
+        "to the language model — it's a separate request field that "
+        "the service handles directly."
     ),
 )
 def execute_transfer(
     uid: CurrentUid,
     payload: ExecuteTransferRequest,
 ) -> dict[str, Any]:
-    """Parse the user's text and execute (or schedule) the transfer.
+    """Execute (or schedule) the transfer from confirmed fields.
 
     Args:
         uid: The authenticated caller's uid, injected from their
             verified Firebase ID token.
         payload: The parsed and validated request body. Contains the
-            user's instruction, their 5-digit PIN, and an optional
-            ``confirmed_recipient_uid`` for the two-step flow. All
-            validated at the schema layer.
+            structured fields from the confirmation the user saw
+            (``recipient_tag``, ``amount_minor``,
+            ``confirmed_recipient_uid``, ``execute_at``), plus a
+            fresh ``idempotency_key`` and the user's 5-digit ``pin``.
 
     Returns:
-        The standard envelope whose ``data`` carries either an
-        ``ImmediateTransferResult`` or a ``ScheduledTransferResult``,
-        discriminated by the ``kind`` field. Response status is 201
-        in both success cases.
+        The standard envelope whose ``data`` carries an
+        ``AiExecuteTransferResult``, discriminated by the ``kind``
+        field. Response status is 201 in both success cases.
 
     Raises:
-        IntentUnparseableError: If the text isn't a transfer request,
-            or is missing a required field.
-        IntentProviderUnavailableError: If Gemini is unreachable.
+        RecipientChangedError: If ``recipient_tag`` no longer
+            resolves to ``confirmed_recipient_uid`` — the tag
+            changed hands since the user confirmed.
+        RecipientNotFoundError: If ``recipient_tag`` no longer
+            resolves to any user at all.
         UserNotFoundError: If the caller has no profile.
-        RecipientNotFoundError: If the recipient tag resolves to no
-            user.
-        RecipientConfirmationMismatchError: If the confirmed recipient
-            uid doesn't match the resolved recipient.
         SelfTransferError: If sender and recipient are the same user.
         AmountBelowMinimumError: If the amount is below the minimum.
         CorridorUnsupportedError: If the currency pair has no corridor.
@@ -192,11 +194,14 @@ def execute_transfer(
         LedgerRepositoryError: On a Firestore failure in the
             immediate path.
     """
-    result: ExecuteTransferPayload = service.execute_transfer(
+    result: AiExecuteTransferResult = service.execute_transfer(
         sender_uid=uid,
-        text=payload.text,
-        pin=payload.pin,
+        recipient_tag=payload.recipient_tag,
+        amount_minor=payload.amount_minor,
         confirmed_recipient_uid=payload.confirmed_recipient_uid,
+        idempotency_key=payload.idempotency_key,
+        pin=payload.pin,
+        execute_at=payload.execute_at,
     )
     return _ok(result.model_dump(mode="json"))
 
@@ -219,9 +224,15 @@ def execute_transfer(
         "    did I last pay David'\n"
         "  - Spending advice — 'am I spending too much this month'\n"
         "  - General money questions — 'how can I save more', "
-        "    'explain compound interest'\n\n"
+        "    'explain compound interest'\n"
+        "  - Transfer intent — 'send 5000 to david.ng'. When the "
+        "    message parses as a transfer, the response carries a "
+        "    `data.action == 'confirm_transfer'` payload with the "
+        "    quoted intent. The frontend should open its PIN dialog "
+        "    and call `/ai/execute-transfer` with the fields from "
+        "    `data.intent`.\n\n"
         "**Response shape.** The response's `data.kind` field is the "
-        "classification of the question, one of the eight ask kinds. "
+        "classification of the question, one of the nine ask kinds. "
         "The `data.answer` field is Nova's natural-language reply, "
         "ready to display as-is. The `data.data` field carries the "
         "structured numbers behind the answer, if any were needed; "
@@ -250,7 +261,9 @@ def ask(
         The standard envelope whose ``data`` is a serialized
         ``AskResponse`` — the classified kind, the answer text, and
         the structured data behind the answer (or None for kinds that
-        fetch nothing).
+        fetch nothing). For a ``TRANSFER_INTENT`` reply, ``data``
+        carries an ``action`` and an ``intent`` block so the frontend
+        can complete the transfer without a second parse.
 
     Raises:
         UserNotFoundError: If the caller has no profile.
