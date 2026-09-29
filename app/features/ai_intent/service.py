@@ -59,12 +59,12 @@ Timezone discipline:
     The conversion from local wall-clock to UTC happens here, not in
     the LLM. ``COUNTRY_TIMEZONE`` maps each country to a fixed-offset
     IANA timezone (no DST across any NovaBanq market). If Gemini
-    returns an unparseable ``execute_at_local``, the service returns
-    ``execute_at=None`` rather than guessing — the frontend then
-    treats the request as immediate, and the user is told to re-enter
-    the time. An explicit ``"today"``/``"tomorrow"`` prefix from
-    Gemini is honored literally; only an unprefixed time falls back to
-    "assume the nearest future occurrence."
+    returns an unparseable ``execute_at_local``, the service raises
+    ``IntentUnparseableError`` rather than guessing — the user asked
+    to defer, and we must not silently settle now. An explicit
+    ``"today"``/``"tomorrow"`` prefix from Gemini is honored
+    literally; only an unprefixed time falls back to "assume the
+    nearest future occurrence."
 
 Error discipline:
     Every failure in the parse path raises ``IntentUnparseableError``,
@@ -74,9 +74,25 @@ Error discipline:
     and only logged — those are internal failures the caller cannot
     act on. Here the caller *is* the user, and "please include an
     amount" is exactly the message that lets them fix their input.
+
+Provider-resilience discipline:
+    Gemini's API returns transient 5xx errors (503 UNAVAILABLE being
+    the common one) during demand spikes. The service absorbs these
+    with a two-model fallback chain plus exponential-ish backoff on
+    each model. See ``_GEMINI_MODEL_CHAIN`` and the retry schedule
+    below ``_call_gemini`` for the exact policy.
+
+Import note:
+    The stdlib ``time`` module is imported as ``time_module`` because
+    ``from datetime import time`` shadows it in the local namespace.
+    Pylance correctly flags ``time.sleep(...)`` as an attribute error
+    under the shadowing; renaming the module import avoids the
+    collision entirely.
 """
 
 import logging
+import re
+import time as time_module
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
@@ -85,6 +101,7 @@ from zoneinfo import ZoneInfo
 
 from google import genai
 from google.genai import types as genai_types
+from google.genai.errors import ClientError, ServerError
 from pydantic import BaseModel
 
 from app.core.config import settings
@@ -236,6 +253,21 @@ prefixed with "today" or "tomorrow". Examples: "17:00", \
 "tomorrow 09:00". Do NOT convert to UTC and do NOT compute any \
 timezone offset — the caller handles that. null if no time is stated.
 
+Time-conversion rules (apply BEFORE returning execute_at_local):
+- "5pm" / "5 pm" / "5PM" / "at 5pm" / "by 5pm" -> "17:00"
+- "5am" / "5 am" -> "05:00"
+- "9:30pm" -> "21:30"
+- "noon" -> "12:00"
+- "midnight" -> "00:00"
+- "17:00" / "17:00:00" -> "17:00"
+- "17.00" -> "17:00"
+- "tomorrow at 9am" -> "tomorrow 09:00"
+- "today at 5pm" -> "today 17:00"
+Always return exactly two digits for hour and two for minute, \
+separated by a single colon. Never return a 12-hour time without \
+converting it to 24-hour first. If you cannot determine a specific \
+time, return null.
+
 The user's country is {country}. Interpret times as the user's local \
 wall-clock time in that country, but do NOT do any timezone \
 arithmetic yourself — return the local time exactly as the user \
@@ -271,7 +303,8 @@ def parse_transfer_intent(
 
     Raises:
         IntentUnparseableError: If the text isn't a transfer request,
-            or is missing a required field (recipient, amount).
+            or is missing a required field (recipient, amount), or the
+            time string couldn't be parsed.
         IntentProviderUnavailableError: If Gemini is unreachable.
         UserNotFoundError: If the sender has no profile.
         RecipientNotFoundError: If the recipient tag resolves to no
@@ -290,7 +323,7 @@ def parse_transfer_intent(
         extraction=extraction, currency=currency
     )
 
-    execute_at = _parse_execute_at(
+    execute_at = _parse_execute_at_strict(
         local_str=validated.execute_at_local,
         country=country,
     )
@@ -354,7 +387,8 @@ def execute_transfer(
 
     Raises:
         IntentUnparseableError: If the text isn't a transfer request,
-            or is missing a required field (recipient, amount).
+            is missing a required field (recipient, amount), or the
+            user specified a time that couldn't be parsed.
         IntentProviderUnavailableError: If Gemini is unreachable.
         UserNotFoundError: If the sender has no profile.
         RecipientNotFoundError: If the recipient tag resolves to no
@@ -382,6 +416,15 @@ def execute_transfer(
     currency = Currency(sender_profile["currency"])
 
     extraction = _call_gemini(text=text, country=country)
+
+    logger.info(
+        "Gemini extraction: action=%r amount=%r tag=%r execute_at=%r",
+        extraction.action,
+        extraction.amount_major,
+        extraction.recipient_tag,
+        extraction.execute_at_local,
+    )
+
     validated = _validate_and_convert_extraction(
         extraction=extraction, currency=currency
     )
@@ -397,7 +440,7 @@ def execute_transfer(
         if resolved_uid != confirmed_recipient_uid:
             raise RecipientConfirmationMismatchError()
 
-    execute_at = _parse_execute_at(
+    execute_at = _parse_execute_at_strict(
         local_str=validated.execute_at_local,
         country=country,
     )
@@ -538,11 +581,49 @@ def _scheduled_key() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Gemini call
+# Gemini call — with retry and model fallback
 # ---------------------------------------------------------------------------
+
+# Model fallback chain. If the primary model returns a transient 5xx
+# (503 UNAVAILABLE is common during demand spikes on Google's side),
+# we retry the primary a few times with backoff, then try a fallback
+# model. Both models below were verified available for the current
+# API key at the time this chain was written.
+#
+# Order matters: the primary is a pinned model (won't drift when
+# Google updates aliases). The fallback is a rolling alias that
+# Google keeps pointed at *some* working Flash model, which makes it
+# a decent second choice when the pinned one is under a demand spike.
+_GEMINI_MODEL_CHAIN: tuple[str, ...] = (
+    "gemini-3.6-flash",
+    "gemini-flash-latest",
+)
+
+# Retry schedule for transient 5xx errors, per model. The first entry
+# (0.0) means "no wait before the first attempt". Total worst-case
+# wait is 1 + 3 = 4 seconds per model, so at most ~8 seconds if we
+# exhaust both models. That is on the edge of acceptable for a chat
+# UX; the point is to absorb short demand spikes, not to hold a
+# request open for a minute.
+_GEMINI_RETRY_DELAYS_SECONDS: tuple[float, ...] = (0.0, 1.0, 3.0)
+
 
 def _call_gemini(*, text: str, country: Country) -> _GeminiExtraction:
     """Call Gemini and return the parsed extraction.
+
+    Tries each model in ``_GEMINI_MODEL_CHAIN`` in order. For each
+    model, retries transient 5xx errors (503 UNAVAILABLE, 500 INTERNAL)
+    up to ``len(_GEMINI_RETRY_DELAYS_SECONDS) - 1`` extra times with
+    backoff. Non-transient errors (4xx — auth, quota, malformed
+    request) abort immediately; retrying them just wastes time.
+
+    Also treats an empty or schema-invalid response as a retry-worthy
+    failure: a model that returns garbage is no more useful than one
+    that 503'd, and the next model in the chain might do better.
+
+    If every model in the chain is exhausted, raises
+    ``IntentProviderUnavailableError``. The frontend shows a generic
+    retry message.
 
     The model is configured with a response schema derived from
     ``_GeminiExtraction``, so the response is constrained to the
@@ -550,42 +631,130 @@ def _call_gemini(*, text: str, country: Country) -> _GeminiExtraction:
     see ``_GeminiExtraction`` for why.
 
     Raises:
-        IntentProviderUnavailableError: If Gemini is unreachable or
-            returns an unparseable response.
+        IntentProviderUnavailableError: If no model in the chain
+            returns a usable response.
     """
-    api_key, model_name = settings.require_gemini_config()
-    client = genai.Client(api_key=api_key)
+    api_key, configured_model_name = settings.require_gemini_config()
 
+    # The configured model goes first if it isn't already in the
+    # chain, so an operator who sets GEMINI_MODEL to a specific value
+    # overrides the built-in chain. If it's already in the chain, the
+    # chain's order wins (avoids calling the same model twice back to
+    # back).
+    model_chain: tuple[str, ...]
+    if configured_model_name in _GEMINI_MODEL_CHAIN:
+        model_chain = _GEMINI_MODEL_CHAIN
+    else:
+        model_chain = (configured_model_name, *_GEMINI_MODEL_CHAIN)
+
+    client = genai.Client(api_key=api_key)
     system_instruction = _SYSTEM_PROMPT.format(country=country.value)
 
-    try:
-        response = client.models.generate_content(
-            model=model_name,
-            contents=text,
-            config=genai_types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                response_mime_type="application/json",
-                response_schema=_GeminiExtraction,
-                temperature=0.0,
-            ),
-        )
-    except Exception as exc:  # noqa: BLE001 — any Gemini failure
-        logger.exception("Gemini call failed for intent parse.")
-        raise IntentProviderUnavailableError() from exc
+    last_exception: Exception | None = None
+    retry_delays = _GEMINI_RETRY_DELAYS_SECONDS
+    last_attempt_index = len(retry_delays) - 1
 
-    raw_text = getattr(response, "text", None)
-    if not raw_text:
-        logger.error("Gemini returned no text for intent parse.")
-        raise IntentProviderUnavailableError()
+    for model_name in model_chain:
+        for attempt_index, delay in enumerate(retry_delays):
+            is_last_attempt_for_model = attempt_index == last_attempt_index
 
-    try:
-        return _GeminiExtraction.model_validate_json(raw_text)
-    except Exception as exc:  # noqa: BLE001 — schema-constrained but not guaranteed
-        logger.exception(
-            "Gemini response didn't match the extraction schema: %s",
-            raw_text,
-        )
-        raise IntentProviderUnavailableError() from exc
+            if delay:
+                time_module.sleep(delay)
+
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=text,
+                    config=genai_types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        response_mime_type="application/json",
+                        response_schema=_GeminiExtraction,
+                        temperature=0.0,
+                    ),
+                )
+            except ServerError as exc:
+                # 5xx — transient. Log and fall through to the next
+                # attempt; if this was the last attempt for this
+                # model, the outer loop advances to the next model.
+                last_exception = exc
+                logger.warning(
+                    "Gemini model=%s attempt=%d/%d failed with "
+                    "status=%s; will %s.",
+                    model_name,
+                    attempt_index + 1,
+                    len(retry_delays),
+                    getattr(exc, "status_code", "5xx"),
+                    "advance to next model"
+                    if is_last_attempt_for_model
+                    else "retry",
+                )
+                continue
+            except ClientError as exc:
+                # 4xx — auth failure, quota exceeded, malformed
+                # request, unknown model. Retrying won't help.
+                logger.exception(
+                    "Gemini call failed with non-retryable client "
+                    "error on model=%s (status=%s).",
+                    model_name,
+                    getattr(exc, "status_code", "4xx"),
+                )
+                raise IntentProviderUnavailableError() from exc
+            except Exception as exc:  # noqa: BLE001
+                # Anything else — network blip, SDK bug, timeout.
+                # Treat as transient and retry.
+                last_exception = exc
+                logger.warning(
+                    "Gemini model=%s attempt=%d/%d raised unexpected "
+                    "%s; will %s.",
+                    model_name,
+                    attempt_index + 1,
+                    len(retry_delays),
+                    type(exc).__name__,
+                    "advance to next model"
+                    if is_last_attempt_for_model
+                    else "retry",
+                )
+                continue
+
+            raw_text = getattr(response, "text", None)
+            if not raw_text:
+                last_exception = IntentProviderUnavailableError()
+                logger.warning(
+                    "Gemini model=%s attempt=%d/%d returned no text; "
+                    "will %s.",
+                    model_name,
+                    attempt_index + 1,
+                    len(retry_delays),
+                    "advance to next model"
+                    if is_last_attempt_for_model
+                    else "retry",
+                )
+                continue
+
+            try:
+                return _GeminiExtraction.model_validate_json(raw_text)
+            except Exception as exc:  # noqa: BLE001
+                last_exception = exc
+                logger.warning(
+                    "Gemini model=%s attempt=%d/%d returned "
+                    "unparseable JSON (%s); will %s.",
+                    model_name,
+                    attempt_index + 1,
+                    len(retry_delays),
+                    raw_text[:200],
+                    "advance to next model"
+                    if is_last_attempt_for_model
+                    else "retry",
+                )
+                continue
+
+    # Every model in the chain, on every retry, failed.
+    logger.error(
+        "All Gemini models exhausted: chain=%s. Last error: %s.",
+        model_chain,
+        last_exception,
+    )
+    raise IntentProviderUnavailableError() from last_exception
 
 
 # ---------------------------------------------------------------------------
@@ -629,37 +798,99 @@ def _parse_amount_decimal(raw: str) -> Decimal:
     return value
 
 
-def _parse_execute_at(
+# The parser is deliberately forgiving about the input formats
+# Gemini actually returns in practice. The naive version only handled
+# a bare "HH:MM" (optionally prefixed with "today"/"tomorrow") and
+# silently returned None on anything else, which caused scheduled
+# intents to fall through to immediate transfers whenever Gemini
+# returned something like "5pm" or "17.00".
+#
+# Recognized shapes:
+#   * "HH:MM" and "HH:MM:SS"       -> time(hour, minute)
+#   * "HH.MM"                       -> time(hour, minute)
+#   * "Hpm" / "H:MMpm" / "H pm"     -> time(hour_24, minute)
+#   * "noon" / "midnight"           -> time(12, 0) / time(0, 0)
+#
+# The 12-hour forms are converted to 24-hour using the standard rule
+# (12am -> 00, 12pm -> 12, 1pm -> 13, etc.).
+
+_HHMM_RE = re.compile(r"^(\d{1,2}):(\d{2})(?::\d{2})?$")
+_HHMM_DOT_RE = re.compile(r"^(\d{1,2})\.(\d{2})$")
+_HHMM_AMPM_RE = re.compile(
+    r"^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$",
+    re.IGNORECASE,
+)
+_NOON_MIDNIGHT_RE = re.compile(r"^(noon|midnight)$", re.IGNORECASE)
+
+
+def _coerce_time_token(token: str) -> time | None:
+    """Parse a bare time token (no day prefix) into a ``datetime.time``.
+
+    Returns ``None`` if the token doesn't match any known shape. The
+    caller decides whether a ``None`` here is fatal (it is, when the
+    user explicitly specified a time).
+    """
+    token = token.strip()
+    if not token:
+        return None
+
+    # "noon" / "midnight"
+    match = _NOON_MIDNIGHT_RE.match(token)
+    if match:
+        word = match.group(1).lower()
+        return time(12, 0) if word == "noon" else time(0, 0)
+
+    # "17:00" / "17:00:00"
+    match = _HHMM_RE.match(token)
+    if match:
+        hour, minute = int(match.group(1)), int(match.group(2))
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return time(hour, minute)
+        return None
+
+    # "17.00"
+    match = _HHMM_DOT_RE.match(token)
+    if match:
+        hour, minute = int(match.group(1)), int(match.group(2))
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return time(hour, minute)
+        return None
+
+    # "5pm" / "5:30pm" / "5 pm"
+    match = _HHMM_AMPM_RE.match(token)
+    if match:
+        hour = int(match.group(1))
+        minute = int(match.group(2)) if match.group(2) else 0
+        meridiem = match.group(3).lower()
+        if not (1 <= hour <= 12) or not (0 <= minute <= 59):
+            return None
+        if meridiem == "am":
+            hour_24 = 0 if hour == 12 else hour
+        else:  # pm
+            hour_24 = 12 if hour == 12 else hour + 12
+        return time(hour_24, minute)
+
+    return None
+
+
+def _parse_execute_at_strict(
     *,
     local_str: str | None,
     country: Country,
 ) -> datetime | None:
-    """Convert a local wall-clock string to a UTC datetime.
+    """Parse a local wall-clock string into a UTC datetime, or raise.
 
-    Gemini is instructed to return the local time (e.g. ``"17:00"``
-    or ``"tomorrow 09:00"``) and NOT to do any timezone math. This
-    function does the conversion deterministically using the sender's
-    country's IANA timezone.
+    Behaviour:
+      * ``local_str is None`` -> returns ``None`` (user asked for
+        immediate).
+      * ``local_str`` is non-null but unparseable -> raises
+        ``IntentUnparseableError``. This is the load-bearing change:
+        the user asked to defer, and we must not silently settle now.
+      * ``local_str`` is parseable -> returns the UTC datetime.
 
-    An explicit ``"today"``/``"tomorrow"`` prefix is honored as given.
-    Only an unprefixed time falls back to "assume the nearest future
-    occurrence" (rolling to tomorrow if that time has already passed
-    today) — that heuristic must not override an explicit day the user
-    stated.
-
-    Returns ``None`` on any parse failure — the frontend then treats
-    the intent as immediate, and the user is shown the current quote
-    without a scheduled time. Failing open here is the right call:
-    an unparseable time should not block a transfer the user might
-    still want to send now.
-
-    Args:
-        local_str: The local wall-clock string from Gemini, or None.
-        country: The sender's country, used to select the timezone.
-
-    Returns:
-        A timezone-aware UTC ``datetime``, or ``None`` if no time was
-        given or the string could not be parsed.
+    The "no country timezone" case also raises, because if we can't
+    even determine the user's timezone, deferring a money movement to
+    an unknown local time is unsafe.
     """
     if not local_str:
         return None
@@ -667,18 +898,17 @@ def _parse_execute_at(
     tz_name = COUNTRY_TIMEZONE.get(country)
     if tz_name is None:
         logger.warning(
-            "No timezone mapping for country=%s; skipping execute_at.",
+            "No timezone mapping for country=%s; refusing to schedule.",
             country.value,
         )
-        return None
+        raise IntentUnparseableError(
+            "I couldn't determine your timezone for the scheduled "
+            "time. Try scheduling again or send immediately."
+        )
 
     tz = ZoneInfo(tz_name)
     now_local = datetime.now(tz)
 
-    # Normalize the input and pull off an explicit day prefix, if any.
-    # The prefix is honored literally — it is not just discarded after
-    # stripping, and it is not allowed to be overridden by the
-    # "roll to tomorrow if already passed" fallback below.
     token = local_str.strip().lower()
     day_offset = 0
     explicit_day = False
@@ -691,15 +921,18 @@ def _parse_execute_at(
         day_offset = 0
         explicit_day = True
 
-    try:
-        hour_str, minute_str = token.split(":", 1)
-        parsed_time = time(int(hour_str), int(minute_str))
-    except (ValueError, IndexError):
+    parsed_time = _coerce_time_token(token)
+    if parsed_time is None:
         logger.info(
-            "Could not parse execute_at_local=%r; treating as immediate.",
+            "Could not parse execute_at_local=%r; raising "
+            "IntentUnparseableError instead of silently sending now.",
             local_str,
         )
-        return None
+        raise IntentUnparseableError(
+            "I couldn't understand the time you specified. "
+            "Try something like: send 5000 to david.ng tomorrow "
+            "at 09:00"
+        )
 
     target_local = datetime.combine(
         now_local.date(), parsed_time, tzinfo=tz
@@ -707,8 +940,8 @@ def _parse_execute_at(
 
     # Only apply the "nearest future occurrence" fallback when Gemini
     # didn't state a day explicitly. An explicit "today 09:00" that has
-    # already passed is left as-is; it is not this function's job to
-    # decide whether a transfer can be scheduled in the past.
+    # already passed is left as-is; the scheduled-transfer service's
+    # own validation will reject a past timestamp with the right error.
     if not explicit_day and target_local <= now_local:
         target_local += timedelta(days=1)
 

@@ -13,9 +13,13 @@ question needs one:
 
 The one exception is ``TRANSFER_INTENT``: a message like "send 200 to
 david.ng" typed into the question chat. It's a real intent the user
-expressed, but this endpoint doesn't execute transfers. It's answered
-by a fixed template that acknowledges the intent and points the user
-at the send flow, without a second model call.
+expressed. This endpoint does *not* execute transfers — the PIN must
+be collected by a dedicated secure dialog on the client, not by a
+chat endpoint — but it *does* parse and quote the transfer, returning
+a structured confirmation payload so the frontend can prompt for the
+PIN and call ``/ai/execute-transfer``. No answer call is made for
+this kind; the reply is a fixed template that names the recipient and
+amount, because there is nothing for the model to decide here.
 
 Fail-soft policy:
 
@@ -70,6 +74,7 @@ from pydantic import BaseModel
 from app.core.config import settings
 from app.core.constants import Country, ErrorCode
 from app.core.exceptions import NovaBanqError
+from app.core.utils import format_amount
 from app.features.ai_intent import ask_repository
 from app.features.ai_intent.ask_prompts import (
     ANSWER_PROMPT,
@@ -84,6 +89,11 @@ from app.features.ai_intent.ask_schemas import (
     NO_DATA_ASK_KINDS,
     AskKind,
     AskResponse,
+)
+from app.features.ai_intent.schemas import ParseIntentResponse
+from app.features.ai_intent.service import (
+    IntentUnparseableError,
+    parse_transfer_intent,
 )
 from app.features.users import service as users_service
 
@@ -192,7 +202,10 @@ def answer_question(
     Returns:
         An ``AskResponse`` with the classification, the answer text,
         and the structured data behind the answer (or None for kinds
-        that fetch nothing).
+        that fetch nothing). For ``TRANSFER_INTENT``, ``data`` carries
+        a structured confirmation payload (``action: "confirm_transfer"``
+        plus an ``intent`` block with the quote) so the frontend can
+        collect the PIN and call ``/ai/execute-transfer``.
 
     Raises:
         UserNotFoundError: If the caller has no profile.
@@ -205,6 +218,17 @@ def answer_question(
             account, when the question was about the balance.
         TransactionRepositoryError: On a Firestore failure reading
             transactions, when the question was about history.
+        RecipientNotFoundError: From the ``TRANSFER_INTENT`` parse
+            path, if the recipient tag in the user's message doesn't
+            resolve to a user.
+        AmountBelowMinimumError: From the ``TRANSFER_INTENT`` parse
+            path, if the parsed amount is below the platform minimum.
+        CorridorUnsupportedError: From the ``TRANSFER_INTENT`` parse
+            path, if the currency pair has no corridor.
+        SelfTransferError: From the ``TRANSFER_INTENT`` parse path,
+            if the sender and recipient are the same user.
+        RateUnavailableError: From the ``TRANSFER_INTENT`` parse path,
+            if no trustworthy FX rate is available.
     """
     profile = users_service.get_profile(sender_uid)
     country = Country(profile["country"])
@@ -212,21 +236,63 @@ def answer_question(
 
     classification = _classify(question=question, country=country)
 
-    # TRANSFER_INTENT short-circuits to a fixed reply. This chat does
-    # not execute transfers; the reply acknowledges what the user
-    # asked for and points them at the send flow. No data fetch, no
-    # answer call — the reply is a template because there is nothing
-    # for the model to decide here, and a template is guaranteed
-    # on-message every time.
+    # TRANSFER_INTENT: parse the instruction and return a structured
+    # confirmation payload so the frontend can prompt for the PIN and
+    # call /ai/execute-transfer. The chat does not execute transfers
+    # itself — the PIN must be collected by a dedicated secure dialog,
+    # not by this endpoint — but it *does* parse and quote the
+    # transfer so the frontend has everything it needs for the
+    # confirmation step.
+    #
+    # If the parse fails because the user's text was incomplete
+    # ("send to david.ng" — no amount), the exception's message is
+    # already written for the user and safe to display. We surface it
+    # as the answer text so the user sees a helpful reply in the chat
+    # instead of an error card. Any other NovaBanqError from the parse
+    # path (recipient not found, corridor unsupported, self-transfer)
+    # propagates — those are real failures the frontend should handle
+    # like any other error.
     if classification.kind is AskKind.TRANSFER_INTENT:
+        try:
+            parsed = parse_transfer_intent(
+                sender_uid=sender_uid, text=question
+            )
+        except IntentUnparseableError as exc:
+            return AskResponse(
+                kind=AskKind.TRANSFER_INTENT,
+                answer=exc.message,
+                data=None,
+            )
+
         return AskResponse(
             kind=AskKind.TRANSFER_INTENT,
-            answer=(
-                f"{first_name}, it looks like you want to send money — "
-                "tap 'Send money' in the app and I'll guide you through "
-                "it. For your security, transfers always need your PIN."
+            answer=_build_transfer_confirmation_message(
+                parsed=parsed, first_name=first_name
             ),
-            data=None,
+            data={
+                "action": "confirm_transfer",
+                "intent": {
+                    "recipient_tag": parsed.quote.recipient.tag,
+                    "recipient_display_name": (
+                        parsed.quote.recipient.display_name
+                    ),
+                    "recipient_uid": parsed.quote.recipient.uid,
+                    "amount_minor": parsed.quote.send_amount_minor,
+                    "sender_currency": parsed.quote.sender_currency,
+                    "fee_minor": parsed.quote.fee_minor,
+                    "total_debit_minor": parsed.quote.total_debit_minor,
+                    "receive_amount_minor": (
+                        parsed.quote.receive_amount_minor
+                    ),
+                    "rate": parsed.quote.rate,
+                    "execute_at": (
+                        parsed.intent.execute_at.isoformat()
+                        if parsed.intent.execute_at is not None
+                        else None
+                    ),
+                    "original_text": question,
+                },
+            },
         )
 
     data = _fetch_data(
@@ -552,6 +618,56 @@ def _answer(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _build_transfer_confirmation_message(
+    *,
+    parsed: ParseIntentResponse,
+    first_name: str,
+) -> str:
+    """Compose Nova's confirmation message for a parsed transfer.
+
+    Two variants, depending on whether the instruction included a
+    future time:
+
+        * Immediate — "David, I'll send GHS 500.00 to David Chinedu
+          (@david.ng). Enter your PIN to confirm."
+        * Scheduled — "David, I'll schedule GHS 500.00 to David
+          Chinedu (@david.ng) for 29 Sep 2026 at 17:00 UTC. Enter
+          your PIN to confirm."
+
+    The amount is formatted with the shared ``format_amount`` helper,
+    which handles currency symbols and the XOF no-minor-unit special
+    case. The timestamp is rendered in UTC in a short human format;
+    the frontend can render it in the user's local timezone if it
+    wants by reading ``data.intent.execute_at`` (which is ISO 8601).
+
+    The confirmation text names the recipient by display name when
+    available, falling back to the raw tag — a deleted profile that
+    the quote still resolved shouldn't produce an empty name here.
+    """
+    recipient_name = (
+        parsed.quote.recipient.display_name
+        or parsed.quote.recipient.tag
+    )
+    amount_display = format_amount(
+        parsed.quote.send_amount_minor,
+        parsed.quote.sender_currency,
+    )
+
+    if parsed.intent.execute_at is None:
+        return (
+            f"{first_name}, I'll send {amount_display} to "
+            f"{recipient_name} (@{parsed.quote.recipient.tag}). "
+            "Enter your PIN to confirm."
+        )
+
+    when = parsed.intent.execute_at.strftime("%d %b %Y at %H:%M UTC")
+    return (
+        f"{first_name}, I'll schedule {amount_display} to "
+        f"{recipient_name} (@{parsed.quote.recipient.tag}) "
+        f"for {when}. Enter your PIN to confirm."
+    )
+
 
 def _json_safe(value: Any) -> Any:
     """Recursively convert a value into something safe for AskResponse.data.
