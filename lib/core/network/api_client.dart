@@ -31,7 +31,7 @@ class ApiClient {
              BaseOptions(
                baseUrl: const String.fromEnvironment(
                  'API_URL',
-                 defaultValue: 'https://novabanq-api.onrender.com/api/v1',
+                 defaultValue: 'https://novabanq-api-5w9p.onrender.com/api/v1',
                ),
                connectTimeout: const Duration(seconds: 10),
                receiveTimeout: const Duration(seconds: 20),

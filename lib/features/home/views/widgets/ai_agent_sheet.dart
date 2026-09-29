@@ -1,5 +1,3 @@
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:hugeicons/hugeicons.dart';
@@ -12,23 +10,26 @@ import 'nova_message_bubble.dart';
 import 'nova_schedule_date_sheet.dart';
 
 class AiAgentSheet extends StatefulWidget {
-  const AiAgentSheet({super.key});
+  const AiAgentSheet({super.key, this.api});
+
+  final NovaApi? api;
 
   @override
   State<AiAgentSheet> createState() => _AiAgentSheetState();
 }
 
 class _AiAgentSheetState extends State<AiAgentSheet> {
-  late final NovaApi api = NovaApi(ApiClient());
+  late final NovaApi api = widget.api ?? NovaApi(ApiClient());
   late final NovaConversationController conversation =
       NovaConversationController(api);
   final input = TextEditingController();
-  final scroll = ScrollController();
+  final sheetController = DraggableScrollableController();
+  ScrollController? sheetScrollController;
 
   @override
   void dispose() {
     input.dispose();
-    scroll.dispose();
+    sheetController.dispose();
     conversation.dispose();
     super.dispose();
   }
@@ -63,9 +64,10 @@ class _AiAgentSheetState extends State<AiAgentSheet> {
 
   void _scrollToLatest() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && scroll.hasClients) {
-        scroll.animateTo(
-          scroll.position.maxScrollExtent,
+      final controller = sheetScrollController;
+      if (mounted && controller != null && controller.hasClients) {
+        controller.animateTo(
+          controller.position.maxScrollExtent,
           duration: const Duration(milliseconds: 180),
           curve: Curves.easeOut,
         );
@@ -73,134 +75,240 @@ class _AiAgentSheetState extends State<AiAgentSheet> {
     });
   }
 
+  void _expandForInput() {
+    if (sheetController.isAttached) {
+      sheetController.animateTo(
+        1,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOut,
+      );
+    }
+  }
+
+  void _resizeFromHandle(DragUpdateDetails details) {
+    if (!sheetController.isAttached) return;
+    final availableHeight =
+        MediaQuery.sizeOf(context).height -
+        MediaQuery.viewInsetsOf(context).bottom;
+    if (availableHeight <= 0) return;
+    final nextSize = (sheetController.size - details.delta.dy / availableHeight)
+        .clamp(0.42, 1.0);
+    sheetController.jumpTo(nextSize.toDouble());
+  }
+
   @override
   Widget build(BuildContext context) {
-    final size = MediaQuery.sizeOf(context);
-    final keyboard = MediaQuery.viewInsetsOf(context).bottom;
-    return AnimatedPadding(
-      duration: const Duration(milliseconds: 180),
-      padding: EdgeInsets.only(bottom: keyboard),
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 47, left: 40, right: 16),
-        padding: const EdgeInsets.all(16),
-        height: math.min(
-          size.height * 0.62,
-          math.max(0, size.height - keyboard - 80),
-        ),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(16),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const NovaMessageBubble(
-              message: NovaMessage('Hi, what would you like to do?'),
-            ),
-            const SizedBox(height: 10),
-            Padding(
-              padding: const EdgeInsets.only(left: 44),
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: AnimatedBuilder(
-                  animation: conversation,
-                  builder: (context, _) => Row(
-                    children: [
-                      AiActionButton(
-                        label: 'Send money',
-                        selected: conversation.mode == NovaInputMode.transfer,
-                        onTap: () =>
-                            conversation.selectMode(NovaInputMode.transfer),
-                      ),
-                      const SizedBox(width: 8),
-                      AiActionButton(
-                        label: 'Schedule payment',
-                        selected: conversation.mode == NovaInputMode.schedule,
-                        onTap: () =>
-                            conversation.selectMode(NovaInputMode.schedule),
-                      ),
-                    ],
-                  ),
-                ),
+    return DraggableScrollableSheet(
+      controller: sheetController,
+      initialChildSize: 0.58,
+      minChildSize: 0.42,
+      maxChildSize: 1,
+      snap: true,
+
+      snapSizes: const [0.58, 1],
+      builder: (context, scrollController) {
+        sheetScrollController = scrollController;
+        return AnimatedBuilder(
+          animation: sheetController,
+          builder: (context, _) {
+            final size = sheetController.isAttached
+                ? sheetController.size
+                : 0.58;
+            final expansion = ((size - 0.58) / (1 - 0.58))
+                .clamp(0.0, 1.0)
+                .toDouble();
+            final isExpanded = expansion >= 0.99;
+            return Container(
+              key: const ValueKey('ai-agent-sheet-surface'),
+              margin: EdgeInsets.lerp(
+                const EdgeInsets.only(bottom: 47, left: 40, right: 16),
+                EdgeInsets.zero,
+                expansion,
               ),
-            ),
-            const SizedBox(height: 16),
-            Expanded(
-              child: AnimatedBuilder(
-                animation: conversation,
-                builder: (context, _) => ListView.builder(
-                  controller: scroll,
-                  itemCount:
-                      conversation.messages.length +
-                      (conversation.isBusy ? 1 : 0),
-                  itemBuilder: (context, index) {
-                    if (index == conversation.messages.length) {
-                      return const Padding(
-                        padding: EdgeInsets.all(12),
-                        child: Align(
-                          alignment: Alignment.centerLeft,
-                          child: SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                        ),
-                      );
-                    }
-                    return NovaMessageBubble(
-                      message: conversation.messages[index],
-                    );
-                  },
-                ),
+              padding: EdgeInsets.fromLTRB(
+                16,
+                12,
+                16,
+                MediaQuery.viewPaddingOf(context).bottom + 12,
               ),
-            ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
               decoration: BoxDecoration(
-                color: const Color(0xFFE9ECEF),
-                borderRadius: BorderRadius.circular(24),
+                color: Colors.white,
+                borderRadius: BorderRadius.lerp(
+                  BorderRadius.circular(16),
+                  const BorderRadius.vertical(top: Radius.circular(20)),
+                  expansion,
+                ),
               ),
-              child: Row(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Expanded(
-                    child: TextField(
-                      controller: input,
-                      maxLength: 500,
-                      minLines: 1,
-                      maxLines: 3,
-                      textInputAction: TextInputAction.send,
-                      onSubmitted: (_) => _send(),
-                      decoration: InputDecoration(
-                        hintText: 'Type your message',
-                        hintStyle: GoogleFonts.outfit(
-                          color: Colors.black54,
-                          fontSize: 14,
-                        ),
-                        border: InputBorder.none,
-                        isDense: true,
-                        counterText: '',
+                  Padding(
+                    padding: EdgeInsets.only(
+                      top: isExpanded ? 30 : 0,
+                    ),
+                    child: SizedBox(
+                      height: isExpanded ? 40 : 16,
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: GestureDetector(
+                              key: const ValueKey('ai-agent-sheet-handle'),
+                              behavior: HitTestBehavior.opaque,
+                              onVerticalDragUpdate: _resizeFromHandle,
+                              child: SizedBox(
+                                width: double.infinity,
+                                height: 40,
+                                child: Center(
+                                  child: Container(
+                                    width: 36,
+                                    height: 4,
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFFD0D5DD),
+                                      borderRadius: BorderRadius.circular(2),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          if (isExpanded)
+                          GestureDetector(
+                            key: const ValueKey('ai-agent-sheet-close'),
+                            onTap: () => Navigator.of(context).pop(),
+                            child: Container(
+                              margin: const EdgeInsets.only(right: 10, top: 20),
+                              height: 20,
+                              width: 20,
+                              alignment: Alignment.center,
+                              child: const Icon(Icons.close),
+                            ),
+                          ),
+
+                        ],
                       ),
                     ),
                   ),
-                  AnimatedBuilder(
-                    animation: conversation,
-                    builder: (context, _) => IconButton(
-                      onPressed: conversation.isBusy ? null : _send,
-                      icon: const HugeIcon(
-                        icon: HugeIcons.strokeRoundedSent,
-                        color: Colors.black87,
-                        size: 20,
+                  const NovaMessageBubble(
+                    message: NovaMessage('Hi, what would you like to do?'),
+                  ),
+                  const SizedBox(height: 10),
+                  Padding(
+                    padding: const EdgeInsets.only(left: 44),
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: AnimatedBuilder(
+                        animation: conversation,
+                        builder: (context, _) => Row(
+                          children: [
+                            AiActionButton(
+                              label: 'Send money',
+                              selected:
+                                  conversation.mode == NovaInputMode.transfer,
+                              onTap: () => conversation.selectMode(
+                                NovaInputMode.transfer,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            AiActionButton(
+                              label: 'Schedule payment',
+                              selected:
+                                  conversation.mode == NovaInputMode.schedule,
+                              onTap: () => conversation.selectMode(
+                                NovaInputMode.schedule,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                      padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Expanded(
+                    child: AnimatedBuilder(
+                      animation: conversation,
+                      builder: (context, _) => ListView.builder(
+                        controller: scrollController,
+                        physics: const AlwaysScrollableScrollPhysics(),
+                        itemCount:
+                            conversation.messages.length +
+                            (conversation.isBusy ? 1 : 0),
+                        itemBuilder: (context, index) {
+                          if (index == conversation.messages.length) {
+                            return const Padding(
+                              padding: EdgeInsets.all(12),
+                              child: Align(
+                                alignment: Alignment.centerLeft,
+                                child: SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                ),
+                              ),
+                            );
+                          }
+                          return NovaMessageBubble(
+                            message: conversation.messages[index],
+                          );
+                        },
+                      ),
+                    ),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 4,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE9ECEF),
+                      borderRadius: BorderRadius.circular(24),
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: input,
+                            onTap: _expandForInput,
+                            maxLength: 500,
+                            minLines: 1,
+                            maxLines: 3,
+                            textInputAction: TextInputAction.send,
+                            onSubmitted: (_) => _send(),
+                            decoration: InputDecoration(
+                              hintText: 'Type your message',
+                              hintStyle: GoogleFonts.outfit(
+                                color: Colors.black54,
+                                fontSize: 14,
+                              ),
+                              border: InputBorder.none,
+                              isDense: true,
+                              counterText: '',
+                            ),
+                          ),
+                        ),
+                        AnimatedBuilder(
+                          animation: conversation,
+                          builder: (context, _) => IconButton(
+                            onPressed: conversation.isBusy ? null : _send,
+                            icon: const HugeIcon(
+                              icon: HugeIcons.strokeRoundedSent,
+                              color: Colors.black87,
+                              size: 20,
+                            ),
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ],
               ),
-            ),
-          ],
-        ),
-      ),
+            );
+          },
+        );
+      },
     );
   }
 }

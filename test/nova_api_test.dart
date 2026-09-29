@@ -34,6 +34,7 @@ void main() {
       InterceptorsWrapper(
         onRequest: (request, handler) {
           expect(request.path, '/ai/ask');
+          expect(request.uri.path, '/api/v1/ai/ask');
           expect(request.data, {'question': "what's my balance"});
           expect(request.headers['Authorization'], 'Bearer token');
           handler.resolve(

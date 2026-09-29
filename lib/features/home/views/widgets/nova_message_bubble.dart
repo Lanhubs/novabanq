@@ -33,7 +33,16 @@ class NovaMessageBubble extends StatelessWidget {
                     : message.isError
                     ? const Color(0xFFFFE5E5)
                     : const Color(0xFFA7E3BB),
-                borderRadius: BorderRadius.circular(16),
+                borderRadius: BorderRadius.only(
+                  topLeft: const Radius.circular(16),
+                  topRight: const Radius.circular(16),
+                  bottomLeft: message.isUser
+                      ? const Radius.circular(16)
+                      : Radius.zero,
+                  bottomRight: message.isUser
+                      ? Radius.zero
+                      : const Radius.circular(16),
+                ),
               ),
               child: Text(
                 message.text,
