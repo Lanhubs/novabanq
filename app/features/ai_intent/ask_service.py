@@ -35,6 +35,22 @@ template in ``confirm_execute``:
     answer call is unreachable — a Gemini outage must not turn a
     good transfer into an error card.
 
+Why ``_extract_target_currency`` exists instead of a classifier
+field:
+
+    A user asking "what's my balance in naira" wants their GHS
+    balance converted to NGN. The classifier schema already carries
+    three nullable extraction fields (``counterparty_tag``,
+    ``period``, ``count``) for the kinds that need them. Adding a
+    fourth for a question shape that a local substring match handles
+    reliably would complicate the prompt and the classification
+    model for no gain — and the classifier never gets to touch a
+    currency conversion's correctness anyway, because the actual
+    conversion runs in the repository against a live corridor rate.
+    So the service extracts the target currency from the question
+    text and passes it in, and the repository decides whether the
+    conversion is possible.
+
 Fail-soft policy:
 
     This is a chat feature, not a money-movement endpoint. A user
@@ -48,6 +64,7 @@ Fail-soft policy:
         * Gemini returns a bad period            → ``"all_time"``
         * Gemini returns a bad count             → ignored (None)
         * Counterparty reference doesn't match   → answer says so
+        * Currency conversion unavailable        → native balance only
         * Gemini is unreachable (data kind)      → ``AskProviderUnavailableError``
         * Gemini is unreachable (GREETING/UNKNOWN) → static template fallback
         * Gemini is unreachable (TRANSFER_INTENT) → template confirmation fallback
@@ -99,7 +116,7 @@ from google.genai import types as genai_types
 from pydantic import BaseModel
 
 from app.core.config import settings
-from app.core.constants import Country, ErrorCode
+from app.core.constants import Country, Currency, ErrorCode
 from app.core.exceptions import NovaBanqError
 from app.features.ai_intent import ask_repository
 from app.features.ai_intent.ask_prompts import (
@@ -136,6 +153,34 @@ _VALID_PERIODS = frozenset(
 # unreachable, rather than raising. See the module docstring's
 # fail-soft policy for the reasoning.
 _LOW_STAKES_KINDS = frozenset({AskKind.GREETING, AskKind.UNKNOWN})
+
+
+# Currency keywords a user might type when asking for a conversion.
+# Covers the everyday names ("naira", "cedis") and the ISO codes
+# ("NGN", "GHS") for the five currencies NovaBanq supports. All keys
+# are lowercase — the lookup lowercases the question first.
+#
+# Order matters for substring matching: "cedis" before "cedi" so a
+# plural match doesn't get shadowed by the singular. Same for
+# "shillings" before "shilling" and "francs" before "franc". Python
+# dict iteration is insertion-ordered, and the lookup returns the
+# first match, so this ordering is load-bearing for a few inputs.
+_CURRENCY_KEYWORDS: dict[str, Currency] = {
+    "naira": Currency.NGN,
+    "ngn": Currency.NGN,
+    "cedis": Currency.GHS,
+    "cedi": Currency.GHS,
+    "ghs": Currency.GHS,
+    "shillings": Currency.KES,
+    "shilling": Currency.KES,
+    "kes": Currency.KES,
+    "francs": Currency.XOF,
+    "franc": Currency.XOF,
+    "cfa": Currency.XOF,
+    "xof": Currency.XOF,
+    "rand": Currency.ZAR,
+    "zar": Currency.ZAR,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -356,6 +401,7 @@ def answer_question(
     data = _fetch_data(
         sender_uid=sender_uid,
         classification=classification,
+        question=question,
     )
     data = _json_safe(data)
 
@@ -527,12 +573,22 @@ def _fetch_data(
     *,
     sender_uid: str,
     classification: _Classification,
+    question: str,
 ) -> dict[str, Any] | None:
     """Fetch whatever data the classified question needs.
 
     Returns None for the kinds in ``NO_DATA_ASK_KINDS`` — those are
     answered from the model's own knowledge, with no account lookup.
     For the rest, dispatches to the matching repository function.
+
+    The ``question`` parameter is threaded through so a few branches
+    can extract information the classifier doesn't emit — currently
+    only the ``BALANCE`` branch uses it, to detect a currency
+    conversion request ("what's my balance in naira"). The classifier
+    schema doesn't have a currency field, and adding one would put a
+    nullable field on a prompt that already has three for a case that
+    a local keyword match handles reliably. See
+    ``_extract_target_currency`` for the details.
 
     Note that ``TRANSFER_INTENT`` never reaches this function — it is
     short-circuited in ``answer_question`` before the fetch step. That
@@ -549,7 +605,10 @@ def _fetch_data(
         return None
 
     if kind is AskKind.BALANCE:
-        return ask_repository.get_balance_context(sender_uid)
+        return ask_repository.get_balance_context(
+            sender_uid,
+            target_currency=_extract_target_currency(question),
+        )
 
     if kind is AskKind.LAST_RECIPIENT:
         last = ask_repository.get_last_outbound(sender_uid)
@@ -598,6 +657,50 @@ def _fetch_data(
         "Unhandled AskKind in _fetch_data: %s. Falling through to no data.",
         kind,
     )
+    return None
+
+
+def _extract_target_currency(question: str) -> Currency | None:
+    """Return the currency the user asked to convert to, if any.
+
+    Matches against a fixed set of currency names and ISO codes that
+    NovaBanq supports. Returns ``None`` when the user didn't mention
+    a currency, in which case the repository returns the native
+    balance only and no conversion happens.
+
+    This is a substring match, not a classifier field. The classifier
+    schema already carries ``counterparty_tag``, ``period``, and
+    ``count`` for the kinds that need them; adding a fourth nullable
+    field to the prompt for a question shape that a local keyword
+    match handles reliably would be a poor trade. The prompt is
+    already at its practical size limit, and the extraction logic
+    here is deterministic and easy to test.
+
+    Edge cases handled by returning ``None``: the user's own currency
+    name appears in the question ("what's my balance in cedis" for a
+    Ghanaian user), the user mentions a currency but doesn't want a
+    conversion ("the last transfer I sent to the naira account"),
+    the user mentions a currency NovaBanq doesn't support. In all of
+    those, no conversion runs and the answer is the native balance —
+    which is correct for the first case and defensible for the
+    others.
+
+    Note that this returns the *target* currency, not the user's
+    own — the repository compares the two and returns the balance
+    unconverted when they're the same. That keeps the caller from
+    having to know the user's currency at extraction time.
+
+    Args:
+        question: The user's question, verbatim.
+
+    Returns:
+        The requested ``Currency``, or ``None`` if no supported
+        currency name was found.
+    """
+    lowered = question.lower()
+    for keyword, currency in _CURRENCY_KEYWORDS.items():
+        if keyword in lowered:
+            return currency
     return None
 
 

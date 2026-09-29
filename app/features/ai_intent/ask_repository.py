@@ -45,6 +45,26 @@ PENDING:
     the same cap as the transaction aggregates) and lets the answer
     prompt decide what to cite based on what the user actually asked.
 
+Why ``get_balance_context`` converts when asked:
+
+    A user asking "what's my balance in naira" is asking a real
+    question that has a real answer — the same corridor the transfer
+    path uses for GHS→NGN gives an exact figure. The conversion runs
+    through ``currency_service.get_rate``, so the number Nova shows
+    matches what a real transfer would produce right now. A missing
+    corridor or unavailable rate is *not* an error for a read-only
+    question: the native balance is always answerable, so the
+    function returns native-only and the prompt falls back to that.
+
+Import note:
+    ``RateUnavailableError`` is defined in ``currency/service.py``,
+    not in ``core/exceptions.py``. It's a feature-scoped error (only
+    the currency feature raises it), so it lives with its feature —
+    the same pattern as ``IntentUnparseableError`` in the AI intent
+    feature. ``CorridorUnsupportedError`` is the opposite case: it's
+    raised by currency, by transfers, and by ask, so it lives in
+    ``core/exceptions.py`` with the shared error surface.
+
 Every function can raise ``TransactionRepositoryError`` from the
 underlying transactions repository, ``ScheduledTransferRepositoryError``
 from the scheduled-transfer repository, or ``AccountUnavailableError``
@@ -58,14 +78,19 @@ read-only lens on the user's own data.
 
 import logging
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any
 
 from app.core.constants import (
+    CURRENCY_MINOR_UNITS,
     Currency,
     ScheduledTransferStatus,
 )
+from app.core.exceptions import CorridorUnsupportedError
 from app.core.utils import format_amount
 from app.features.accounts import service as accounts_service
+from app.features.currency import service as currency_service
+from app.features.currency.service import RateUnavailableError
 from app.features.ledger.schemas import TransactionDocument
 from app.features.transactions import repository as transactions_repository
 from app.features.transfers import scheduled_repository
@@ -94,17 +119,44 @@ _MAX_SCHEDULED_PER_QUERY = 50
 # BALANCE
 # ---------------------------------------------------------------------------
 
-def get_balance_context(uid: str) -> dict[str, Any]:
+def get_balance_context(
+    uid: str,
+    *,
+    target_currency: Currency | None = None,
+) -> dict[str, Any]:
     """Return the caller's account balance in a display-ready shape.
+
+    When ``target_currency`` is provided and differs from the caller's
+    own currency, the returned dict also carries a converted amount.
+    The conversion uses the same live corridor rate every transfer
+    uses — no separate rate is fetched, and the corridor is the same
+    one that would apply if the user actually sent the money. That
+    means the number Nova shows for "what's my balance in naira"
+    matches what a real GHS→NGN transfer would produce right now.
+
+    A missing corridor or unavailable rate is NOT an error here. The
+    user asked a read-only question about their balance, and the
+    native balance is always answerable. When the conversion can't
+    be computed, the native-only dict is returned and the answer
+    prompt falls back to describing the balance in the user's own
+    currency, with a warm "I don't have that rate right now" if the
+    user explicitly asked for a different one.
 
     Args:
         uid: The authenticated caller's uid.
+        target_currency: If given and different from the caller's own
+            currency, the currency to convert the balance into. The
+            service layer decides whether to pass this — it derives
+            it from the user's question via a local keyword match,
+            not from a classifier field, because the classifier
+            schema doesn't carry a currency.
 
     Returns:
         A dict with ``balance_minor`` (int), ``currency`` (str), and
-        ``balance_display`` (str, already formatted with the currency
-        symbol and thousands separators — the prompt uses this
-        directly so Nova doesn't have to guess at formatting).
+        ``balance_display`` (str). When a conversion was requested
+        and could be computed, also carries ``converted_minor``,
+        ``converted_currency``, ``converted_display``, and
+        ``conversion_rate``.
 
     Raises:
         UserNotFoundError: If the caller has no profile.
@@ -115,11 +167,43 @@ def get_balance_context(uid: str) -> dict[str, Any]:
     currency = Currency(profile["currency"])
     balance_minor = accounts_service.get_balance_minor(uid)
 
-    return {
+    result: dict[str, Any] = {
         "balance_minor": balance_minor,
         "currency": currency.value,
         "balance_display": format_amount(balance_minor, currency),
     }
+
+    if target_currency is None or target_currency == currency:
+        return result
+
+    # A real conversion. Use the same corridor the transfer path uses
+    # so the number Nova shows matches what a transfer would actually
+    # produce right now.
+    try:
+        exchange_rate = currency_service.get_rate(currency, target_currency)
+    except (CorridorUnsupportedError, RateUnavailableError):
+        # Read-only question, native answer is always acceptable.
+        # Log at info (not warning) — this is expected behavior for
+        # an unusual pairing, not a defect.
+        logger.info(
+            "No convertible rate for %s->%s on balance query; "
+            "returning native balance only.",
+            currency.value,
+            target_currency.value,
+        )
+        return result
+
+    converted_minor = _convert_minor(
+        balance_minor, currency, target_currency, exchange_rate.rate
+    )
+
+    result.update({
+        "converted_minor": converted_minor,
+        "converted_currency": target_currency.value,
+        "converted_display": format_amount(converted_minor, target_currency),
+        "conversion_rate": str(exchange_rate.rate),
+    })
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -571,6 +655,53 @@ def list_scheduled_transfers(uid: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _convert_minor(
+    amount_minor: int,
+    from_currency: Currency,
+    to_currency: Currency,
+    rate: Decimal,
+) -> int:
+    """Convert a minor-unit amount between two currencies.
+
+    Both sides are in minor units, so the calculation normalizes
+    through major units: divide by the source multiplier, multiply
+    by the rate, multiply by the target multiplier. All in
+    ``Decimal`` to keep the precision the ledger would apply.
+
+    The result is truncated (not rounded) to the target currency's
+    minor unit. This matches how the ledger handles conversions: it
+    stores integer minor units, so a fraction of a minor unit that
+    can't be represented is dropped, not rounded. For a display-only
+    figure this doesn't matter, but using truncation keeps the number
+    Nova shows consistent with what a real transfer would produce.
+
+    XOF is handled correctly here because ``CURRENCY_MINOR_UNITS``
+    maps it to 1. Divide by 1 on the source side, multiply by 1 on
+    the target side, and the math reduces to the plain rate
+    multiplication every other conversion uses.
+
+    Args:
+        amount_minor: The amount to convert, in the source currency's
+            minor units.
+        from_currency: The source currency.
+        to_currency: The target currency.
+        rate: How many units of ``to_currency`` one unit of
+            ``from_currency`` buys. Already a ``Decimal`` — the caller
+            gets it from an ``ExchangeRate`` dataclass.
+
+    Returns:
+        The converted amount, in the target currency's minor units.
+    """
+    source_multiplier = CURRENCY_MINOR_UNITS[from_currency]
+    target_multiplier = CURRENCY_MINOR_UNITS[to_currency]
+
+    major_from = Decimal(amount_minor) / source_multiplier
+    major_to = major_from * rate
+    minor_to = int(major_to * target_multiplier)
+
+    return minor_to
+
 
 def _outbound_summary(doc: TransactionDocument) -> dict[str, Any]:
     """Project one outbound TransactionDocument into a small summary dict.

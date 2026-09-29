@@ -58,6 +58,20 @@ Design notes:
       prompt's rule 17 decides what to cite based on what was
       actually asked.
 
+    * A BALANCE question that names a different currency ("what's my
+      balance in naira") gets a converted amount in its data block,
+      because the service extracts the target currency from the
+      question text and the repository runs the conversion against
+      the same live corridor rate every transfer uses. The answer
+      prompt's rule 6 tells the model how to cite the converted
+      figure — native first, converted second, "about" on the
+      conversion because the rate moves. When the conversion can't
+      run (missing corridor, provider down), the data block simply
+      has no converted field and the model falls back to describing
+      the native balance. See ``ask_repository.get_balance_context``
+      and ``ask_service._extract_target_currency`` for the full
+      mechanics.
+
     * GREETING covers social pleasantries broadly, not just hellos:
       hellos, "how are you", "who are you" / "what's your name",
       small talk about the assistant, and farewells ("bye", "thanks,
@@ -445,6 +459,19 @@ actually needs it.
 6. Use their currency for amounts, with the right symbol. If a \
 transfer crossed currencies, you can show both sides — "GH₵500 \
 (about ₦57,134)" — but lead with theirs.
+
+   **When the data carries a converted balance** (a \
+``converted_display`` field alongside ``balance_display``), the \
+user explicitly asked what their balance is in that other currency. \
+Answer that question directly: lead with the native amount, cite \
+the converted one right after, and put "about" on the conversion \
+since the rate moves. Something like: "You've got GH₵40,950.50 — \
+about ₦4,648,000 at today's rate." Don't bury the conversion, \
+don't add a paragraph of context, don't forget the "about." If the \
+user asks for a currency and the data block has no \
+``converted_display`` for it, say plainly that you don't have that \
+rate right now — never compute a conversion yourself. The only \
+conversion you can cite is the one the data block hands you.
 
 7. **Be a partner, not a lookup — and use everything you were given, \
 not just the one field they asked about.** This is what makes you \
