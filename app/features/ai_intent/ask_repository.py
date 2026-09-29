@@ -1,15 +1,17 @@
 """AI ask repository.
 
-Read-only data access for the AI financial assistant. Five functions,
+Read-only data access for the AI financial assistant. Six functions,
 one per data-needing ``AskKind``. Every function returns a plain dict
 suitable for json.dumps-ing into the answer prompt's ``{data}``
 block, and for embedding in an ``AskResponse.data`` field.
 
-Three functions bypass Firestore entirely — ``get_balance_context``
-delegates to ``accounts_service``, and ``get_last_outbound`` delegates
-to the transactions repository. Only ``summarize_spending``,
-``get_counterparty_history``, and ``summarize_for_advice`` do their
-own aggregation, and they do it by fetching a capped batch of the
+Four functions bypass Firestore's aggregation path entirely —
+``get_balance_context`` delegates to ``accounts_service``,
+``get_last_outbound`` and ``get_counterparty_history`` delegate to
+the transactions repository, and ``list_scheduled_transfers``
+delegates to the scheduled-transfer repository. Only
+``summarize_spending`` and ``summarize_for_advice`` do their own
+aggregation, and they do it by fetching a capped batch of the
 caller's outbound transfers through ``transactions_repository`` and
 filtering / summing in Python.
 
@@ -31,8 +33,21 @@ Why the aggregation is in Python, not pushed to Firestore:
     sees the flag rather than silently reporting a partial total as
     if it were complete.
 
+Why ``list_scheduled_transfers`` fetches every status, not just
+PENDING:
+
+    The motivating question this function exists to answer is "did my
+    scheduled payment go out?" — which is inherently a question about
+    a schedule that has already transitioned *away* from PENDING. If
+    the function only returned pending schedules, it would be
+    structurally unable to answer the very question it was written
+    for. So it fetches the caller's full schedule history (bounded by
+    the same cap as the transaction aggregates) and lets the answer
+    prompt decide what to cite based on what the user actually asked.
+
 Every function can raise ``TransactionRepositoryError`` from the
-underlying transactions repository, or ``AccountUnavailableError``
+underlying transactions repository, ``ScheduledTransferRepositoryError``
+from the scheduled-transfer repository, or ``AccountUnavailableError``
 from the accounts service. The service layer catches those and maps
 them to a ``NovaBanqError`` subclass for the router.
 
@@ -45,12 +60,16 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from app.core.constants import Currency
+from app.core.constants import (
+    Currency,
+    ScheduledTransferStatus,
+)
+from app.core.utils import format_amount
 from app.features.accounts import service as accounts_service
 from app.features.ledger.schemas import TransactionDocument
 from app.features.transactions import repository as transactions_repository
+from app.features.transfers import scheduled_repository
 from app.features.users import service as users_service
-from app.core.utils import format_amount
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +84,12 @@ logger = logging.getLogger(__name__)
 _MAX_TRANSACTIONS_PER_QUERY = 500
 
 
+# The maximum number of scheduled transfers ``list_scheduled_transfers``
+# will fetch. Same reasoning as the transaction cap — bounded read,
+# "truncated" flag on the return, prompt acknowledges the floor.
+_MAX_SCHEDULED_PER_QUERY = 50
+
+
 # ---------------------------------------------------------------------------
 # BALANCE
 # ---------------------------------------------------------------------------
@@ -76,11 +101,10 @@ def get_balance_context(uid: str) -> dict[str, Any]:
         uid: The authenticated caller's uid.
 
     Returns:
-        A dict with ``balance_minor`` (int), ``currency`` (str),
+        A dict with ``balance_minor`` (int), ``currency`` (str), and
         ``balance_display`` (str, already formatted with the currency
         symbol and thousands separators — the prompt uses this
-        directly so Nova doesn't have to guess at formatting), and
-        ``updated_at`` (ISO 8601 string, or None).
+        directly so Nova doesn't have to guess at formatting).
 
     Raises:
         UserNotFoundError: If the caller has no profile.
@@ -110,6 +134,17 @@ def get_last_outbound(uid: str) -> dict[str, Any] | None:
     person-to-person, and the question "who did I send money to last"
     is about a counterparty, not about a top-up or a payout.
 
+    The repository returns transactions of every type that involve
+    the caller as the sender, ordered newest first. This function
+    fetches a small batch and takes the first ``TRANSFER`` row; if
+    the batch contains no transfers (e.g. the caller's last few
+    sender-side activities were all deposits or withdrawals), the
+    function returns ``None`` and the caller answers "you haven't
+    sent anyone money yet." The batch size is a small constant
+    rather than 1 specifically because the newest row can be a
+    non-TRANSFER — asking Firestore for exactly 1 would return
+    whatever the newest row is, filtered or not.
+
     Args:
         uid: The authenticated caller's uid.
 
@@ -122,12 +157,17 @@ def get_last_outbound(uid: str) -> dict[str, Any] | None:
         ``created_at`` (ISO 8601 string) — or ``None`` if the caller
         has never sent a transfer.
     """
-    docs = transactions_repository.list_for_sender(uid, limit=1)
-    if not docs:
-        return None
+    # Fetch a small batch, not just 1 — the newest row might be a
+    # FUNDING or WITHDRAWAL, in which case a limit=1 fetch would give
+    # us the wrong row entirely. Filter for TRANSFER and take the
+    # first match.
+    docs = transactions_repository.list_for_sender(uid, limit=20)
 
-    doc = docs[0]
-    return _outbound_summary(doc)
+    for doc in docs:
+        if doc.transaction_type.value == "TRANSFER":
+            return _outbound_summary(doc)
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +395,12 @@ def summarize_for_advice(
     user is sending and what they're receiving, so it can comment on
     net flow rather than just gross spending.
 
+    Both the outbound and inbound sides do their own capped fetch, so
+    both can independently hit ``_MAX_TRANSACTIONS_PER_QUERY``. The
+    returned ``truncated`` flag is True if either side hit its cap —
+    the caller needs to know the merged totals are lower bounds, and
+    it doesn't matter which side caused that.
+
     Args:
         uid: The authenticated caller's uid.
         days: How many days back to look. Defaults to 30.
@@ -374,6 +420,9 @@ def summarize_for_advice(
     # would distort the advice if counted as income from a peer.
     received_docs = transactions_repository.list_for_recipient(
         uid, limit=_MAX_TRANSACTIONS_PER_QUERY
+    )
+    received_truncated = (
+        len(received_docs) >= _MAX_TRANSACTIONS_PER_QUERY
     )
     received = [
         d
@@ -405,6 +454,15 @@ def summarize_for_advice(
     outbound_currency = Currency(outbound["currency"])
     net_flow_minor = received_total_minor - outbound["total_minor"]
 
+    # The merged truncated flag: True if either side hit its cap.
+    # The outbound truncated flag comes from ``summarize_spending``;
+    # the inbound one is computed here. Both sides can under-report
+    # (outbound totals or received totals respectively), so the
+    # caller needs to know if either one did.
+    merged_truncated = (
+        outbound["truncated"] or received_truncated
+    )
+
     return {
         **outbound,
         "received_total_minor": received_total_minor,
@@ -417,6 +475,96 @@ def summarize_for_advice(
             net_flow_minor, outbound_currency
         ),
         "window_days": days,
+        "truncated": merged_truncated,
+    }
+
+
+# ---------------------------------------------------------------------------
+# SCHEDULED_TRANSFERS
+# ---------------------------------------------------------------------------
+
+def list_scheduled_transfers(uid: str) -> dict[str, Any]:
+    """Return the caller's scheduled transfers — every status.
+
+    The question this kind exists to answer is "did my scheduled
+    payment to X go out?", which is inherently about a schedule that
+    has already transitioned away from PENDING. So this function
+    fetches *all* of the caller's scheduled transfers, not just the
+    pending ones. ``SCHEDULED_TRANSFERS`` classification lands here
+    regardless of whether the user's question was about a pending
+    schedule, a completed one, a failed one, or a cancelled one — the
+    answer prompt reads the statuses in the returned data and figures
+    out what to say.
+
+    The underlying repository method is the same one the transfer
+    listing endpoint uses (``scheduled_repository.list_for_user``),
+    which returns the caller's scheduled transfers ordered by
+    ``created_at`` DESC and capped at the repository's own default.
+    This function re-caps at ``_MAX_SCHEDULED_PER_QUERY`` so the
+    prompt's data block stays bounded regardless of the endpoint's
+    default.
+
+    Args:
+        uid: The authenticated caller's uid.
+
+    Returns:
+        A dict with:
+
+            ``schedules`` — a list of per-schedule summaries, newest
+            first. Each summary has ``scheduled_transfer_id``,
+            ``recipient_tag``, ``recipient_display_name``,
+            ``amount_minor``, ``sender_currency``,
+            ``amount_display``, ``execute_at`` (ISO 8601 string or
+            None), ``status`` (one of ``PENDING``, ``SETTLED``,
+            ``FAILED``, ``CANCELLED``), ``transaction_id`` (str or
+            None — only populated once the schedule settled),
+            ``failure_reason`` (str or None — populated only on
+            FAILED), and ``created_at`` (ISO 8601 string or None).
+
+            ``count`` — total number of schedules included.
+
+            ``pending_count`` — how many are still PENDING.
+
+            ``settled_count`` — how many have SETTLED.
+
+            ``truncated`` — True if the underlying fetch hit the cap,
+            meaning the list is a floor, not the full set.
+
+        An empty list is returned when the caller has no schedules at
+        all — the shape stays the same so the prompt doesn't have to
+        branch.
+
+    Raises:
+        ScheduledTransferRepositoryError: On a Firestore failure
+            reading the scheduled_transfers collection.
+    """
+    raw_docs = scheduled_repository.list_for_user(
+        uid, limit=_MAX_SCHEDULED_PER_QUERY
+    )
+    truncated = len(raw_docs) >= _MAX_SCHEDULED_PER_QUERY
+
+    schedules = [_scheduled_transfer_summary(doc) for doc in raw_docs]
+
+    # Derived counts save the answer prompt from having to iterate
+    # the schedules list when all it needs is a "how many pending"
+    # number. Cheap to compute here, and the shape stays predictable.
+    pending_count = sum(
+        1
+        for s in schedules
+        if s.get("status") == ScheduledTransferStatus.PENDING.value
+    )
+    settled_count = sum(
+        1
+        for s in schedules
+        if s.get("status") == ScheduledTransferStatus.SETTLED.value
+    )
+
+    return {
+        "schedules": schedules,
+        "count": len(schedules),
+        "pending_count": pending_count,
+        "settled_count": settled_count,
+        "truncated": truncated,
     }
 
 
@@ -462,6 +610,66 @@ def _outbound_summary(doc: TransactionDocument) -> dict[str, Any]:
         )
 
     return summary
+
+
+def _scheduled_transfer_summary(doc: dict[str, Any]) -> dict[str, Any]:
+    """Project one scheduled_transfers document into a small summary dict.
+
+    Every scheduled-transfer document carries ``amount_minor`` in the
+    *sender's* currency — the schedule is created with the sender's
+    currency at creation time, and it's what the eventual transfer
+    will debit. So the display amount uses ``sender_currency`` from
+    the same document.
+
+    The ``status`` field is passed through as a plain string (its
+    ``StrEnum`` value), so the answer prompt sees
+    ``"PENDING"``/``"SETTLED"``/``"FAILED"``/``"CANCELLED"`` as
+    literals it can match against.
+
+    The ``execute_at`` and ``created_at`` fields are Firestore
+    timestamps that the repository returns as native ``datetime``
+    objects; both are normalized to ISO 8601 strings here so the data
+    block is JSON-safe without further conversion. Both keys are
+    always present in the returned dict — if the underlying document
+    is missing one, the value is ``None`` rather than the key being
+    omitted, matching how ``_outbound_summary`` handles its own
+    optional ``created_at``. A missing key would make the answer
+    prompt reason about absence-of-a-field instead of presence-with-
+    value-None, which is a distinction that has no meaning for what
+    the caller needs. The answer prompt's timezone rule (rule 4)
+    converts them to the user's local time before citing.
+    """
+    sender_currency = Currency(doc["sender_currency"])
+    amount_minor = doc["amount_minor"]
+
+    # Both timestamps get the same treatment: always present in the
+    # returned dict, ISO 8601 if the underlying value is a datetime,
+    # None otherwise. Consistent with _outbound_summary's handling of
+    # its own optional timestamp.
+    execute_at = doc.get("execute_at")
+    created_at = doc.get("created_at")
+
+    return {
+        "scheduled_transfer_id": doc["scheduled_transfer_id"],
+        "recipient_tag": doc["recipient_tag"],
+        "recipient_display_name": doc.get("recipient_display_name"),
+        "amount_minor": amount_minor,
+        "sender_currency": sender_currency.value,
+        "amount_display": format_amount(amount_minor, sender_currency),
+        "status": doc["status"],
+        "transaction_id": doc.get("transaction_id"),
+        "failure_reason": doc.get("failure_reason"),
+        "execute_at": (
+            execute_at.isoformat()
+            if isinstance(execute_at, datetime)
+            else None
+        ),
+        "created_at": (
+            created_at.isoformat()
+            if isinstance(created_at, datetime)
+            else None
+        ),
+    }
 
 
 def _top_counterparties(

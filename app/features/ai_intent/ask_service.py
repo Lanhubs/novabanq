@@ -4,7 +4,7 @@ Answers a user's natural-language question about their own money.
 Two Gemini calls per question, plus a repository lookup when the
 question needs one:
 
-    1. Classify the question with Gemini into one of nine
+    1. Classify the question with Gemini into one of ten
        ``AskKind`` values, plus an optional counterparty reference,
        period, and count.
     2. If the kind needs data, fetch it from ``ask_repository``.
@@ -21,6 +21,20 @@ PIN and call ``/ai/execute-transfer``. That parse-and-quote work is
 delegated to ``ai_intent.confirm_execute.build_transfer_intent_response``;
 this module's job is only to wire the result into an ``AskResponse``.
 
+Why the confirmation bubble is written by Gemini, not by the
+template in ``confirm_execute``:
+
+    Every other Nova reply is written by the answer call, so the
+    voice stays consistent across kinds. A transfer confirmation is
+    the moment the user is paying closest attention — a hardcoded
+    template there would be the one reply that sounds like a
+    different, worse bot. So this module routes the confirmation
+    through ``_answer()`` like everything else, passing the quote as
+    the ``{data}`` block. The template in ``confirm_execute`` is
+    still carried on the confirmation object and fires only when the
+    answer call is unreachable — a Gemini outage must not turn a
+    good transfer into an error card.
+
 Fail-soft policy:
 
     This is a chat feature, not a money-movement endpoint. A user
@@ -36,15 +50,18 @@ Fail-soft policy:
         * Counterparty reference doesn't match   → answer says so
         * Gemini is unreachable (data kind)      → ``AskProviderUnavailableError``
         * Gemini is unreachable (GREETING/UNKNOWN) → static template fallback
+        * Gemini is unreachable (TRANSFER_INTENT) → template confirmation fallback
         * Firestore is down while fetching data  → propagates (502)
 
-    The split in the two Gemini-unreachable lines is deliberate. A
+    The split in the Gemini-unreachable lines is deliberate. A
     question about the user's balance deserves an honest failure
     rather than a friendly "I didn't understand" when the model can't
     be reached — the balance is real data, and its absence is worth
-    surfacing. But GREETING and UNKNOWN never had account data at
-    stake in the first place, so a warm canned line beats a 502 for
-    the two lowest-stakes kinds in the feature.
+    surfacing. But GREETING, UNKNOWN, and TRANSFER_INTENT all have a
+    valid fallback that does not lose the user any information: a
+    warm canned line for the first two, and the exact structured
+    confirmation (already bound to numbers the frontend will send)
+    for the third.
 
 Data safety:
 
@@ -58,6 +75,16 @@ Data safety:
     ``AskResponse`` — the one place data crosses from an internal
     fetch into the externally-facing response — rather than trusting
     every router that ever calls this service to dump in JSON mode.
+
+Prompt-formatting note:
+
+    ``ANSWER_PROMPT`` contains a ``{country}`` placeholder (the
+    timezone rule needs to know which country's timezone to convert
+    UTC timestamps into). The ``_answer()`` call must pass
+    ``country=country.value`` to ``ANSWER_PROMPT.format(...)`` or the
+    format call raises ``KeyError: 'country'`` on every request.
+    This is a required field, not an optional one — the prompt has
+    the placeholder unconditionally.
 """
 
 import json
@@ -90,6 +117,7 @@ from app.features.ai_intent.ask_schemas import (
     AskResponse,
 )
 from app.features.ai_intent.confirm_execute import (
+    TransferIntentConfirmation,
     build_transfer_intent_response,
 )
 from app.features.users import service as users_service
@@ -208,13 +236,17 @@ def answer_question(
         UserNotFoundError: If the caller has no profile.
         AskProviderUnavailableError: If Gemini is unreachable for the
             classification call, or for the answer of a data-backed
-            kind. GREETING and UNKNOWN never raise on an unreachable
-            answer call — they fall back to a static template; see
+            kind. GREETING, UNKNOWN, and TRANSFER_INTENT never raise
+            on an unreachable answer call — they fall back to a
+            static template or the confirmation's own template; see
             the module docstring.
         AccountUnavailableError: On a Firestore failure reading the
             account, when the question was about the balance.
         TransactionRepositoryError: On a Firestore failure reading
             transactions, when the question was about history.
+        ScheduledTransferRepositoryError: On a Firestore failure
+            reading scheduled transfers, when the question was about
+            a schedule.
         RecipientNotFoundError: From the ``TRANSFER_INTENT`` parse
             path, if the recipient tag in the user's message doesn't
             resolve to a user.
@@ -253,6 +285,13 @@ def answer_question(
     # tells the frontend "show this in the chat, don't prompt for a
     # PIN". A complete parse becomes an AskResponse whose ``data``
     # carries the ``confirm_transfer`` action and the intent block.
+    #
+    # The confirmation bubble is written by the answer call (same as
+    # every other Nova reply) so the voice stays consistent. On a
+    # Gemini outage for the answer call, the confirmation's own
+    # template fires — the user still sees a valid confirmation and
+    # can still transfer, and the frontend still gets the same
+    # ``data.intent`` payload either way.
     if classification.kind is AskKind.TRANSFER_INTENT:
         outcome = build_transfer_intent_response(
             sender_uid=sender_uid,
@@ -271,13 +310,21 @@ def answer_question(
             )
 
         # A full confirmation is available. Shape it into the
-        # structured payload the frontend consumes.
+        # structured payload the frontend consumes, and write the
+        # confirmation bubble through the answer call.
         confirmation = outcome.confirmation
         assert confirmation is not None  # invariant of TransferIntentOutcome
 
+        answer = _answer_transfer_intent(
+            question=question,
+            first_name=first_name,
+            country=country,
+            confirmation=confirmation,
+        )
+
         return AskResponse(
             kind=AskKind.TRANSFER_INTENT,
-            answer=confirmation.answer_text,
+            answer=answer,
             data={
                 "action": "confirm_transfer",
                 "intent": {
@@ -321,6 +368,7 @@ def answer_question(
             question=question,
             classification=classification,
             first_name=first_name,
+            country=country,
             data=data,
         )
     except AskProviderUnavailableError:
@@ -373,7 +421,7 @@ def _classify(*, question: str, country: Country) -> _Classification:
 
     Falls back to ``AskKind.UNKNOWN`` on any recoverable failure:
     invalid JSON from the model, a kind string that isn't one of the
-    nine, or a missing kind field. An unreachable provider propagates
+    ten, or a missing kind field. An unreachable provider propagates
     as ``AskProviderUnavailableError`` — the frontend shows the user a
     "try again" rather than pretending the assistant has no idea what
     they asked.
@@ -536,7 +584,15 @@ def _fetch_data(
     if kind is AskKind.SPENDING_ADVICE:
         return ask_repository.summarize_for_advice(sender_uid, days=30)
 
-    # Any kind that slipped past the classifier's nine should have
+    if kind is AskKind.SCHEDULED_TRANSFERS:
+        # The repository function returns every status — pending,
+        # settled, failed, and cancelled — because the kind answers
+        # both "what's still pending?" and "did it go out?". The
+        # answer prompt's rule 17 reads the statuses and figures out
+        # what to cite.
+        return ask_repository.list_scheduled_transfers(sender_uid)
+
+    # Any kind that slipped past the classifier's ten should have
     # become UNKNOWN already. If we reach here, be defensive.
     logger.error(
         "Unhandled AskKind in _fetch_data: %s. Falling through to no data.",
@@ -554,6 +610,7 @@ def _answer(
     question: str,
     classification: _Classification,
     first_name: str,
+    country: Country,
     data: dict[str, Any] | None,
 ) -> str:
     """Generate the human-readable answer.
@@ -575,6 +632,13 @@ def _answer(
     fetch. That includes GREETING, GENERAL_FINANCE, and UNKNOWN, none
     of which need account data — the answer prompt is written to
     handle a "none" data block gracefully for each.
+
+    The ``{country}`` placeholder is filled with the sender's country
+    code. The prompt's timezone rule needs it to convert UTC
+    timestamps into the user's local time before citing them. This is
+    a required field — the prompt has the placeholder
+    unconditionally, so omitting it raises ``KeyError: 'country'`` on
+    every call.
 
     An unreachable provider propagates as
     ``AskProviderUnavailableError``. ``answer_question`` is what
@@ -602,6 +666,7 @@ def _answer(
         first_name=first_name,
         data=data_block,
         capability_hint=CAPABILITY_HINT,
+        country=country.value,
     )
 
     try:
@@ -624,6 +689,100 @@ def _answer(
         raise AskProviderUnavailableError()
 
     return answer.strip()
+
+
+def _answer_transfer_intent(
+    *,
+    question: str,
+    first_name: str,
+    country: Country,
+    confirmation: TransferIntentConfirmation,
+) -> str:
+    """Write the transfer confirmation bubble through the answer call.
+
+    Reuses ``_answer()`` so the confirmation goes through the exact
+    same Gemini call every other Nova reply goes through — same voice,
+    same rules, same personality. The quote is passed as the ``{data}``
+    block, shaped by ``_transfer_intent_data_block`` so the answer
+    prompt's TRANSFER_INTENT rule knows exactly what to cite.
+
+    On a Gemini outage for the answer call, this function falls back
+    to the confirmation's own ``answer_text`` template. That's a
+    deliberate difference from the fail-soft policy for BALANCE and
+    SPENDING_SUMMARY, which re-raise on an unreachable answer call:
+    those kinds have real numbers at stake, and a canned reply
+    pretending to know them would be a lie. A transfer confirmation
+    is not like that — the numbers the user needs are already in the
+    structured ``data.intent`` block the frontend will send to
+    ``/ai/execute-transfer``, and the template cites the exact same
+    figures. Falling back doesn't lose the user any information, and
+    it means a Gemini hiccup can never block a legitimate transfer.
+
+    Args:
+        question: The user's original message, verbatim. Passed to
+            the answer call so the prompt sees what was asked.
+        first_name: The caller's first name, for the prompt.
+        country: The caller's country, for the prompt's timezone
+            rule.
+        confirmation: The parse-and-quote result from
+            ``build_transfer_intent_response``.
+
+    Returns:
+        Nova's confirmation text — Gemini's version on the normal
+        path, the confirmation's ``answer_text`` template on a
+        Gemini outage.
+    """
+    try:
+        return _answer(
+            question=question,
+            classification=_Classification(
+                kind=AskKind.TRANSFER_INTENT,
+                counterparty_tag=confirmation.recipient_tag,
+                period="all_time",
+                count=None,
+            ),
+            first_name=first_name,
+            country=country,
+            data=_transfer_intent_data_block(confirmation),
+        )
+    except AskProviderUnavailableError:
+        logger.warning(
+            "Gemini answer call unavailable for TRANSFER_INTENT; "
+            "returning template confirmation."
+        )
+        return confirmation.answer_text
+
+
+def _transfer_intent_data_block(
+    confirmation: TransferIntentConfirmation,
+) -> dict[str, Any]:
+    """Shape a confirmation into the ``{data}`` block the answer prompt reads.
+
+    Every value here is already-computed, already-safe data from the
+    confirmation the parser produced. Nothing in this helper invents
+    a value. The keys mirror the answer prompt's TRANSFER_INTENT rule
+    (rule 14) so the model can cite exactly the recipient, amount,
+    fee, and receive amount that the user is about to approve.
+
+    ``execute_at`` is normalized to ISO 8601 for consistency with the
+    other JSON-safe data blocks this service builds.
+    """
+    return {
+        "kind": "transfer_confirmation",
+        "recipient_display_name": confirmation.recipient_display_name,
+        "recipient_tag": confirmation.recipient_tag,
+        "amount_minor": confirmation.amount_minor,
+        "sender_currency": confirmation.sender_currency,
+        "fee_minor": confirmation.fee_minor,
+        "total_debit_minor": confirmation.total_debit_minor,
+        "receive_amount_minor": confirmation.receive_amount_minor,
+        "rate": confirmation.rate,
+        "execute_at": (
+            confirmation.execute_at.isoformat()
+            if confirmation.execute_at is not None
+            else None
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------

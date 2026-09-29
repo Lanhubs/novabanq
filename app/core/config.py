@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Application
     # ------------------------------------------------------------------
-    app_name: str = "NovaBanq API"
+    app_name: str = "NovaBanq"
     app_env: str = Field(default="development")
     app_version: str = "0.1.0"
     debug: bool = Field(default=False)

@@ -59,6 +59,20 @@ On the confirmation text:
     unreachable, so a Gemini outage does not turn a good transfer
     into an error card.
 
+On the help message for an incomplete parse:
+
+    The parser raises ``IntentUnparseableError`` with a specific
+    message naming the field it couldn't find. That precision is
+    correct for most cases — "send to david.ng" without an amount
+    really does need "please include an amount," full stop. But it
+    reads wrong when the user's message clearly asked to *schedule*
+    a transfer and the parse failed before the time step: the
+    message ends up asking for a missing amount without ever
+    acknowledging that scheduling was understood. Users read that as
+    a bot that wasn't listening. ``_improve_help_message`` rewrites
+    the parser's message for that specific case, keeping the parser
+    as the source of truth for everything else.
+
 Shape conventions:
 
     ``TransferIntentConfirmation`` is a Pydantic model (frozen),
@@ -236,7 +250,8 @@ def build_transfer_intent_response(
     into recipient_tag / amount / execute_at", and it already raises
     ``IntentUnparseableError`` with a specific, user-facing message on
     an incomplete parse. This function's job is only to catch that
-    exception and shape the outcome.
+    exception, improve the message when the user asked to schedule,
+    and shape the outcome.
 
     Args:
         sender_uid: The authenticated caller's uid.
@@ -272,11 +287,16 @@ def build_transfer_intent_response(
             sender_uid=sender_uid, text=question
         )
     except IntentUnparseableError as exc:
-        # The parse was incomplete — missing amount, missing recipient,
-        # or an unparseable time. The exception's message is already
-        # written for the user; surface it as a chat reply.
+        # The parse was incomplete — missing amount, missing
+        # recipient, or an unparseable time. The parser's message is
+        # usually exactly right; ``_improve_help_message`` rewrites it
+        # for the one case where it isn't (see that helper's
+        # docstring).
         return TransferIntentOutcome(
-            help_message=exc.message,
+            help_message=_improve_help_message(
+                original_message=exc.message,
+                user_text=question,
+            ),
             confirmation=None,
         )
 
@@ -339,6 +359,89 @@ def _render_confirmation_text(
         f"{first_name}, I'll schedule {amount_display} to "
         f"{recipient_display} (@{quote.recipient.tag}) for {when}. "
         "Enter your PIN to confirm."
+    )
+
+
+# Words that indicate the user wants the transfer deferred, not sent
+# now. Used by ``_improve_help_message`` to recognise a schedule
+# intent even when the parse failed before the execute_at step.
+#
+# Deliberately conservative — "later" alone could mean "a few seconds
+# later," so we also match the compound forms ("send later", "pay
+# later"). A user who types "later" by itself and gets the
+# schedule-aware help message is no worse off than before; a user who
+# types "at 5pm" and doesn't get it would be confused.
+_SCHEDULE_CUES: tuple[str, ...] = (
+    "schedule",
+    "scheduled",
+    "tomorrow",
+    "next week",
+    "next month",
+    "at 5pm",
+    "at 6pm",
+    "at 7pm",
+    "at 8pm",
+    "at 9pm",
+    "this evening",
+    "tonight",
+    "in an hour",
+    "in a few hours",
+    "in a minute",
+    "in a few minutes",
+    "send later",
+    "pay later",
+    "transfer later",
+)
+
+
+def _mentions_scheduling(text: str) -> bool:
+    """True when the user's message hints at a deferred transfer.
+
+    Substring match against a fixed list of schedule cues, case-
+    insensitive. Covers the phrasings real users actually type;
+    anything exotic falls through to the parser's own default help
+    message, which is still correct — just less warm.
+    """
+    lowered = text.lower()
+    return any(cue in lowered for cue in _SCHEDULE_CUES)
+
+
+def _improve_help_message(
+    *,
+    original_message: str,
+    user_text: str,
+) -> str:
+    """Rewrite a parser help message when the user asked to schedule.
+
+    The parser's own message is precise about the single missing
+    field it noticed first (usually the amount). That precision is
+    right for a straight send instruction — "send 500" without a
+    recipient gets "please include who you're sending to," full
+    stop. But when the user said "schedule a payment," the parser's
+    message can read as if it didn't register the schedule intent at
+    all, and a user who hears "please include an amount" after
+    asking to schedule something reads that as a bot that wasn't
+    listening.
+
+    If the user mentioned scheduling, this returns a message that
+    acknowledges it and asks for both pieces a scheduled transfer
+    needs: an amount and a time. Otherwise the original message
+    passes through unchanged.
+
+    The message asks for both fields rather than the specific one
+    the parser happened to notice, because in the scheduled case
+    the user usually needs to provide both anyway (they gave neither
+    an amount nor a time, or gave one and not the other), and asking
+    for both in one line avoids a two-turn back-and-forth where the
+    first turn only resolves half the problem.
+    """
+    if not _mentions_scheduling(user_text):
+        return original_message
+
+    return (
+        "Happy to schedule that — I just need to know how much to "
+        "send and when. Try something like: send 5000 to david.ng "
+        "tomorrow at 09:00."
     )
 
 
