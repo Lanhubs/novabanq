@@ -4,7 +4,7 @@ Answers a user's natural-language question about their own money.
 Two Gemini calls per question, plus a repository lookup when the
 question needs one:
 
-    1. Classify the question with Gemini into one of ten
+    1. Classify the question with Gemini into one of eleven
        ``AskKind`` values, plus an optional counterparty reference,
        period, and count.
     2. If the kind needs data, fetch it from ``ask_repository``.
@@ -288,7 +288,8 @@ def answer_question(
         AccountUnavailableError: On a Firestore failure reading the
             account, when the question was about the balance.
         TransactionRepositoryError: On a Firestore failure reading
-            transactions, when the question was about history.
+            transactions, when the question was about history or
+            inbound senders.
         ScheduledTransferRepositoryError: On a Firestore failure
             reading scheduled transfers, when the question was about
             a schedule.
@@ -467,10 +468,10 @@ def _classify(*, question: str, country: Country) -> _Classification:
 
     Falls back to ``AskKind.UNKNOWN`` on any recoverable failure:
     invalid JSON from the model, a kind string that isn't one of the
-    ten, or a missing kind field. An unreachable provider propagates
-    as ``AskProviderUnavailableError`` — the frontend shows the user a
-    "try again" rather than pretending the assistant has no idea what
-    they asked.
+    eleven, or a missing kind field. An unreachable provider
+    propagates as ``AskProviderUnavailableError`` — the frontend
+    shows the user a "try again" rather than pretending the assistant
+    has no idea what they asked.
     """
     api_key, model_name = settings.require_gemini_config()
     client = genai.Client(api_key=api_key)
@@ -643,6 +644,13 @@ def _fetch_data(
     if kind is AskKind.SPENDING_ADVICE:
         return ask_repository.summarize_for_advice(sender_uid, days=30)
 
+    if kind is AskKind.INBOUND_SENDERS:
+        # Returns every inbound TRANSFER grouped by sender, with
+        # totals and counts. The answer prompt's rule 18 reads the
+        # shape and answers the specific question asked — "who sent
+        # me money", "how many times", "which tags", "who sent most".
+        return ask_repository.list_inbound_senders(sender_uid)
+
     if kind is AskKind.SCHEDULED_TRANSFERS:
         # The repository function returns every status — pending,
         # settled, failed, and cancelled — because the kind answers
@@ -651,7 +659,7 @@ def _fetch_data(
         # what to cite.
         return ask_repository.list_scheduled_transfers(sender_uid)
 
-    # Any kind that slipped past the classifier's ten should have
+    # Any kind that slipped past the classifier's eleven should have
     # become UNKNOWN already. If we reach here, be defensive.
     logger.error(
         "Unhandled AskKind in _fetch_data: %s. Falling through to no data.",

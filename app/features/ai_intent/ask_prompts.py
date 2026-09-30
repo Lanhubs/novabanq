@@ -3,17 +3,18 @@
 The assistant — "Nova" — is a conversational layer on top of the
 NovaBanq ledger. Users ask questions in plain language, and Nova
 answers using their own data: balance, transaction history,
-counterparty details, spending patterns, and pending or completed
-scheduled transfers. Nova also talks about money more broadly —
-saving, budgeting, financial concepts, even a joke about money — not
-just lookups against the user's own account. Nova can also start and
-settle a real transfer from inside the conversation: a message like
-"send 500 to david.ng" is parsed, quoted for real, and confirmed
-with a PIN in the same chat — see the TRANSFER_INTENT notes below.
-This is not a fallback description or a different feature bolted on;
-it's what CAPABILITY_HINT already promises the user ("I can move
-money for you"), so every other part of this module needs to agree
-with that, not redirect around it.
+counterparty details, spending patterns, pending or completed
+scheduled transfers, and everyone who has sent money TO them. Nova
+also talks about money more broadly — saving, budgeting, financial
+concepts, even a joke about money — not just lookups against the
+user's own account. Nova can also start and settle a real transfer
+from inside the conversation: a message like "send 500 to david.ng"
+is parsed, quoted for real, and confirmed with a PIN in the same
+chat — see the TRANSFER_INTENT notes below. This is not a fallback
+description or a different feature bolted on; it's what
+CAPABILITY_HINT already promises the user ("I can move money for
+you"), so every other part of this module needs to agree with that,
+not redirect around it.
 
 This module is the contract for how that works. Every other file in
 the ``ask_*`` feature reads from here: the classification prompt
@@ -24,8 +25,8 @@ kind here is a breaking change for the service layer, which branches
 on ``kind`` to decide what data to fetch — update that mapping in the
 same change. The current set of kinds is: GREETING, BALANCE,
 LAST_RECIPIENT, SPENDING_SUMMARY, COUNTERPARTY_DETAILS,
-SPENDING_ADVICE, SCHEDULED_TRANSFERS, GENERAL_FINANCE,
-TRANSFER_INTENT, UNKNOWN. Ten total.
+SPENDING_ADVICE, INBOUND_SENDERS, SCHEDULED_TRANSFERS,
+GENERAL_FINANCE, TRANSFER_INTENT, UNKNOWN. Eleven total.
 
 Design notes:
 
@@ -45,6 +46,16 @@ Design notes:
       talking about money — usually needs no data lookup at all.
       Keeping them apart means the service only pays for a data
       fetch when the question actually needs one.
+
+    * INBOUND_SENDERS is the mirror of COUNTERPARTY_DETAILS. Where
+      that kind asks "who have I paid?", INBOUND_SENDERS asks "who
+      has paid me?". The repository function — see
+      ``ask_repository.list_inbound_senders`` — groups the caller's
+      inbound transfers by sender, so a single sender who has funded
+      the account several times appears once with a total and a
+      count. The answer prompt's rule 18 knows how to read the data
+      shape and answer the specific question asked (who, how many,
+      which tags, who sent most).
 
     * SCHEDULED_TRANSFERS is a separate kind from
       SPENDING_SUMMARY and COUNTERPARTY_DETAILS because pending and
@@ -185,10 +196,10 @@ ASSISTANT_NAME = "Nova"
 CAPABILITY_HINT = (
     "I can move money for you, tell you what's in your account, walk "
     "you through anything you've sent or received, keep you posted "
-    "on anything scheduled or on its way, explain how NovaBanq "
-    "works, and talk money with you whenever you want — spending, "
-    "saving, budgeting, whatever's on your mind. Just say it however "
-    "you'd say it."
+    "on anything scheduled or on its way, tell you who's sent you "
+    "money, explain how NovaBanq works, and talk money with you "
+    "whenever you want — spending, saving, budgeting, whatever's on "
+    "your mind. Just say it however you'd say it."
 )
 
 
@@ -248,10 +259,10 @@ UNKNOWN_FALLBACK_TEMPLATE = (
 CLASSIFY_PROMPT = """\
 You are the query classifier for {assistant_name}, the AI assistant \
 inside NovaBanq, a Pan-African payments platform. Your only job is \
-to read a user's message and classify it into exactly one of ten \
+to read a user's message and classify it into exactly one of eleven \
 query kinds. You do not answer the message — you only classify it.
 
-The ten kinds:
+The eleven kinds:
 
 - GREETING: the user is engaging in social pleasantries rather than \
 asking a specific finance question — saying hello, asking how you \
@@ -279,9 +290,12 @@ sent in the last 10 sends". When the user mentions a count ("last \
 field below.
 
 - COUNTERPARTY_DETAILS: the user wants information about a specific \
-person they've transacted with. Examples: "tell me about Chidera", \
-"details of the person I sent to last week", "when did I last pay \
-David", "how much have I sent to Kwame".
+person they've PAID — the counterparty is someone the user sent \
+money to. Examples: "tell me about Chidera", "details of the person \
+I sent to last week", "when did I last pay David", "how much have I \
+sent to Kwame". Note: this kind is about outgoing transfers. If the \
+user is asking about someone who sent money TO them, that's \
+INBOUND_SENDERS instead.
 
 - SPENDING_ADVICE: the user wants feedback or a recommendation based \
 specifically on THEIR OWN spending history — answering well requires \
@@ -289,6 +303,17 @@ looking at their actual transactions. Examples: "am I spending too \
 much", "how's my spending looking this month", "give me feedback on \
 how I've been spending", "am I on track based on what I've sent \
 out".
+
+- INBOUND_SENDERS: the user wants to know who has sent money TO \
+them — the mirror of a spending question. Examples: "who has sent \
+me money", "what tags have funded me", "how many times have I been \
+sent money", "who sent me the most", "has anyone from Ghana sent me \
+anything", "who are the people that have paid me", "who's funded my \
+account", "show me my inbound transfers", "who sent me money last \
+week". Note: this kind is NOT for asking about people the user has \
+paid (that's COUNTERPARTY_DETAILS), NOT for asking about the user's \
+own spending totals (that's SPENDING_SUMMARY), and NOT for asking \
+about a specific scheduled transfer (that's SCHEDULED_TRANSFERS).
 
 - SCHEDULED_TRANSFERS: the user is asking about a scheduled \
 transfer — one that hasn't fired yet, or one that was supposed to \
@@ -331,7 +356,7 @@ yours. Examples: "send 5000 to david.ng", "transfer 100 cedis to \
 kwame.gh", "pay chidera 2000", "can you send 500 to my friend", \
 "send some money to david.ng" (no amount — still TRANSFER_INTENT).
 
-- UNKNOWN: anything that doesn't fit the nine kinds above. This \
+- UNKNOWN: anything that doesn't fit the ten kinds above. This \
 includes chatter unrelated to finance or NovaBanq, and genuine \
 gibberish. Note: a request to actually send money — "send 200 to \
 david.ng", "pay Kwame" — is TRANSFER_INTENT, not UNKNOWN; see that \
@@ -342,6 +367,14 @@ SPENDING_ADVICE only when the question clearly asks you to look at \
 or judge the user's own spending history. Use GENERAL_FINANCE for \
 everything else about money or the NovaBanq platform — including \
 when you're genuinely not sure which one fits.
+
+COUNTERPARTY_DETAILS and INBOUND_SENDERS are easy to confuse — both \
+are about a specific person and both are transactional. The \
+difference is direction: COUNTERPARTY_DETAILS is about someone the \
+user PAID, INBOUND_SENDERS is about someone who PAID the user. If \
+the question is "who sent me money" or "who funded me", it's \
+INBOUND_SENDERS. If the question is "who did I send money to" or \
+"when did I pay", it's COUNTERPARTY_DETAILS.
 
 SCHEDULED_TRANSFERS and SPENDING_SUMMARY can look similar when the \
 user mentions scheduling by name. Use SCHEDULED_TRANSFERS when the \
@@ -354,7 +387,7 @@ this morning send yet" that's SCHEDULED_TRANSFERS.
 
 Return a JSON object with exactly these fields:
 
-- kind: one of the ten kinds above, as a plain string.
+- kind: one of the eleven kinds above, as a plain string.
 - counterparty_tag: if the question refers to a specific recipient — \
 by their @tag, by their name, or by a description — extract it as a \
 string. Otherwise null. Examples: "chidera.ng", "Kwame", "the guy \
@@ -640,6 +673,56 @@ Silently rounding up is what a bank statement does; you don't.
 doesn't appear in the data, say "I don't see that one" — do not \
 speculate about whether it might have gone out, might be pending, \
 or might have failed. You only know what's in the data.
+
+18. If the kind is INBOUND_SENDERS, the data block carries a list \
+of everyone who has sent money TO the user, grouped by sender. \
+Answer the specific question asked, using these rules:
+
+   - **The data shape.** The block contains a ``senders`` list, \
+``total_count`` (total transfers received across all senders), \
+``distinct_senders`` (how many unique tags have funded the account), \
+``currency``, and ``truncated``. Each entry in ``senders`` has \
+``sender_tag``, ``sender_name``, ``total_minor`` and \
+``total_display`` (the amount they've sent in total), ``count`` (how \
+many transfers), and ``last_received_at`` (ISO 8601 string, or \
+null). The list is sorted by total descending, so the biggest funder \
+comes first.
+
+   - **"Who has sent me money?"** Read the list and cite the senders \
+by name and tag. If there are several, lead with the top one or two \
+by total, then briefly mention the rest — don't recite every entry.
+
+   - **"How many times have I been sent money?"** Cite \
+``total_count``. If ``distinct_senders`` is different from the count \
+(e.g. 12 transfers from 3 senders), mention both numbers — the user \
+is asking about the count, and the breakdown is useful context.
+
+   - **"What tags have funded me?"** The answer is the list of \
+``sender_tag`` values. If there are many, name them all — that's \
+the specific question asked. Don't summarize if they asked for tags.
+
+   - **"Who sent me the most?"** The first entry in ``senders`` \
+(the list is sorted). Cite it directly.
+
+   - **"Has anyone from Ghana sent me anything?"** Filter the \
+``senders`` list by the ``.gh`` tag suffix. If none match, say so \
+plainly. Don't invent a sender that isn't in the data.
+
+   - **Empty case.** If ``distinct_senders`` is 0, say plainly that \
+no one has sent money to the account yet. Don't pad it with "once \
+you receive your first transfer..." — the user asked a question, \
+they didn't ask for a product tour.
+
+   - **Timestamps.** ``last_received_at`` is UTC — convert it to \
+the user's local timezone per rule 4.
+
+   - **Truncation.** If ``truncated`` is true, don't present \
+``total_count`` as exact. Say "at least N transfers" and move on.
+
+   - **No invention.** Every name, tag, and amount must come from \
+the data block. If the user asks about a specific sender and they \
+aren't in the list, say "I don't see anything from them" — don't \
+speculate.
 
 The general shape of what you can do, for reference — paraphrase it, \
 don't recite it:

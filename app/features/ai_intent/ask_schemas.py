@@ -40,7 +40,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class AskKind(StrEnum):
-    """The ten question types Nova can classify a user's question into.
+    """The eleven question types Nova can classify a user's question into.
 
     ``StrEnum`` so the value serializes to its string form
     (``"BALANCE"``) in JSON, and comparisons against the value work
@@ -56,8 +56,11 @@ class AskKind(StrEnum):
     BALANCE                the user's account balance
     LAST_RECIPIENT         the user's most recent outbound transfer
     SPENDING_SUMMARY       aggregated totals over a time period
-    COUNTERPARTY_DETAILS   transaction history with one counterparty
+    COUNTERPARTY_DETAILS   outgoing transfers with one counterparty
     SPENDING_ADVICE        recent transaction patterns, aggregated
+    INBOUND_SENDERS        who has sent money TO the user, grouped
+                           by counterparty — the mirror of
+                           COUNTERPARTY_DETAILS
     SCHEDULED_TRANSFERS    the user's scheduled transfers — both
                            pending and already-completed schedules,
                            from the scheduled_transfers collection
@@ -83,11 +86,17 @@ class AskKind(StrEnum):
     produced a transaction (SETTLED or FAILED). The kind therefore
     fetches *all* of the user's scheduled transfers regardless of
     status, and the answer prompt decides what to cite based on what
-    the question actually asked. Without this kind, Nova had no way
-    to see the schedule side at all, so a user asking about their
-    own pending or completed schedule would get "I don't see any
-    scheduled transfers" even when one existed. This kind closes
-    that gap.
+    the question actually asked.
+
+    Why ``INBOUND_SENDERS`` exists as its own kind: the outbound
+    aggregations in ``ask_repository`` — ``summarize_spending`` and
+    ``get_counterparty_history`` — only look at transfers the caller
+    *sent*. A user asking "who has sent me money?" or "what tags have
+    funded me?" is asking about inbound transfers from other users,
+    and that data path didn't exist until this kind. The repository
+    function ``list_inbound_senders`` groups the caller's inbound
+    transfers by sender, and the answer prompt's rule 18 knows how to
+    read the data shape and answer the specific question asked.
     """
 
     GREETING = "GREETING"
@@ -96,6 +105,7 @@ class AskKind(StrEnum):
     SPENDING_SUMMARY = "SPENDING_SUMMARY"
     COUNTERPARTY_DETAILS = "COUNTERPARTY_DETAILS"
     SPENDING_ADVICE = "SPENDING_ADVICE"
+    INBOUND_SENDERS = "INBOUND_SENDERS"
     SCHEDULED_TRANSFERS = "SCHEDULED_TRANSFERS"
     GENERAL_FINANCE = "GENERAL_FINANCE"
     TRANSFER_INTENT = "TRANSFER_INTENT"
@@ -122,17 +132,6 @@ NO_DATA_ASK_KINDS: frozenset[AskKind] = frozenset(
 )
 
 
-# The kinds whose ``AskResponse.data`` must always be ``None``: the
-# kinds in ``NO_DATA_ASK_KINDS`` (which return None by design because
-# they fetch nothing), plus ``TRANSFER_INTENT`` (which short-circuits
-# in ``answer_question`` before the fetch step and returns its
-# structured payload in ``data`` as a dict with ``action`` and
-# ``intent`` keys, not as a per-kind data block). Wait — that's not
-# right. ``TRANSFER_INTENT`` *does* return a ``data`` dict on a
-# successful parse. See the validator below for the actual rule.
-_NO_DATA_OR_REDIRECT_ASK_KINDS: frozenset[AskKind] = NO_DATA_ASK_KINDS
-
-
 class AskRequest(BaseModel):
     """The user's question to the assistant.
 
@@ -151,10 +150,11 @@ class AskRequest(BaseModel):
             "The user's question, verbatim. Any of: a greeting, a "
             "balance check, a question about past transactions, a "
             "spending summary, a request for advice based on the "
-            "user's own spending, a question about pending or "
-            "completed scheduled transfers, a general money "
-            "question, a send-money instruction, or something "
-            "unrelated that will fall through to UNKNOWN."
+            "user's own spending, a question about who has sent "
+            "money to them, a question about pending or completed "
+            "scheduled transfers, a general money question, a "
+            "send-money instruction, or something unrelated that "
+            "will fall through to UNKNOWN."
         ),
         examples=["who did I send money to last?", "what's my balance?"],
     )
@@ -170,10 +170,10 @@ class AskResponse(BaseModel):
     BALANCE, a small table for a SPENDING_SUMMARY, and so on.
 
     The ``data`` field is typed ``dict[str, Any] | None`` deliberately,
-    rather than a discriminated union of ten per-kind models. The
+    rather than a discriminated union of eleven per-kind models. The
     shapes are small and varied (a balance is two fields, a summary is
     four, a counterparty detail is a handful), the frontend mostly
-    renders them optionally, and ten near-identical response
+    renders them optionally, and eleven near-identical response
     containers would be real overhead for little safety gained. The
     service layer defines a ``TypedDict`` per kind for internal
     type-checking on the *construction* side — those aren't exposed
@@ -196,7 +196,7 @@ class AskResponse(BaseModel):
     for a no-data kind) at the boundary rather than only in review.
     The positive case — that a data-bearing kind's ``data`` has the
     right shape for that kind — is not enforced here, because that
-    would mean ten discriminated models, which the paragraph above
+    would mean eleven discriminated models, which the paragraph above
     explains is not worth the overhead.
 
     Frozen — a response is a read-only projection.
@@ -208,7 +208,7 @@ class AskResponse(BaseModel):
         ...,
         description=(
             "The classification of the user's question. Determines "
-            "the shape of ``data``. Always one of the ten "
+            "the shape of ``data``. Always one of the eleven "
             "``AskKind`` members."
         ),
         examples=["BALANCE"],
@@ -254,7 +254,7 @@ class AskResponse(BaseModel):
 
         Deliberately does NOT enforce the positive case — that a
         data-bearing kind has the right *shape* of ``data``. That
-        would require ten discriminated response models, which
+        would require eleven discriminated response models, which
         ``AskResponse``'s docstring explains is a tradeoff not worth
         making for this endpoint.
 

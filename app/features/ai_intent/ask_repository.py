@@ -1,19 +1,19 @@
 """AI ask repository.
 
-Read-only data access for the AI financial assistant. Six functions,
+Read-only data access for the AI financial assistant. Seven functions,
 one per data-needing ``AskKind``. Every function returns a plain dict
 suitable for json.dumps-ing into the answer prompt's ``{data}``
 block, and for embedding in an ``AskResponse.data`` field.
 
 Four functions bypass Firestore's aggregation path entirely —
 ``get_balance_context`` delegates to ``accounts_service``,
-``get_last_outbound`` and ``get_counterparty_history`` delegate to
-the transactions repository, and ``list_scheduled_transfers``
-delegates to the scheduled-transfer repository. Only
-``summarize_spending`` and ``summarize_for_advice`` do their own
-aggregation, and they do it by fetching a capped batch of the
-caller's outbound transfers through ``transactions_repository`` and
-filtering / summing in Python.
+``get_last_outbound``, ``get_counterparty_history``, and
+``list_inbound_senders`` delegate to the transactions repository, and
+``list_scheduled_transfers`` delegates to the scheduled-transfer
+repository. Only ``summarize_spending`` and ``summarize_for_advice``
+do their own aggregation, and they do it by fetching a capped batch
+of the caller's outbound transfers through ``transactions_repository``
+and filtering / summing in Python.
 
 Why the aggregation is in Python, not pushed to Firestore:
 
@@ -44,6 +44,17 @@ PENDING:
     for. So it fetches the caller's full schedule history (bounded by
     the same cap as the transaction aggregates) and lets the answer
     prompt decide what to cite based on what the user actually asked.
+
+Why ``list_inbound_senders`` exists:
+
+    "Who has sent me money?" is a legitimate, common question that the
+    outbound-only aggregations can't answer. ``summarize_spending``
+    and ``get_counterparty_history`` both look only at transfers the
+    caller *sent*. A user asking who has funded them isn't asking
+    about their own spending — they're asking about inbound transfers
+    from other users, and that data path didn't exist until this
+    function. The mirror of ``get_counterparty_history``: same shape,
+    other direction.
 
 Why ``get_balance_context`` converts when asked:
 
@@ -461,6 +472,167 @@ def get_counterparty_history(
         if last.created_at
         else None,
         "transactions": [_outbound_summary(d) for d in matches[:5]],
+    }
+
+
+# ---------------------------------------------------------------------------
+# INBOUND_SENDERS
+# ---------------------------------------------------------------------------
+
+def list_inbound_senders(uid: str) -> dict[str, Any]:
+    """Return everyone who has sent money TO the caller.
+
+    The mirror of ``get_counterparty_history``. Where that function
+    answers "who has this user paid?", this one answers "who has paid
+    this user?". Every inbound ``TRANSFER`` where the caller was the
+    recipient is grouped by the sender's snapshot, so a sender who
+    funded the account several times appears once with a total and a
+    count.
+
+    Only ``TRANSFER`` rows are counted. A ``FUNDING`` transaction (a
+    deposit from a bank or mobile money account) has no counterparty
+    tag — it comes from outside NovaBanq — so it's excluded. The user
+    who asks "what tags have funded me?" is asking about other users,
+    not about their own bank transfers.
+
+    Args:
+        uid: The authenticated caller's uid.
+
+    Returns:
+        A dict with:
+
+            ``senders`` — a list of per-sender summaries, sorted by
+            total received descending, then by count descending. Each
+            entry has ``sender_uid``, ``sender_tag``, ``sender_name``
+            (or the tag as a fallback if the sender's profile was
+            deleted), ``total_minor``, ``currency``, ``total_display``
+            (formatted amount), ``count`` (number of transfers
+            received from this sender), and ``last_received_at``
+            (ISO 8601 string, or None).
+
+            ``total_count`` — total number of inbound transfers across
+            all senders.
+
+            ``distinct_senders`` — how many unique tags have funded
+            the account.
+
+            ``currency`` — the caller's currency code.
+
+            ``truncated`` — True if the underlying fetch hit the cap,
+            meaning the list is a floor.
+
+        An empty ``senders`` list with zeroed counts is returned when
+        the caller has never received a transfer — the shape stays
+        the same so the prompt doesn't have to branch.
+
+    Raises:
+        TransactionRepositoryError: On a Firestore failure reading
+            transactions.
+        UserNotFoundError: If the caller has no profile, in the empty
+            case where the currency has to be derived from it.
+    """
+    docs = transactions_repository.list_for_recipient(
+        uid, limit=_MAX_TRANSACTIONS_PER_QUERY
+    )
+    truncated = len(docs) >= _MAX_TRANSACTIONS_PER_QUERY
+
+    # Only TRANSFER rows count. Funding deposits have no counterparty
+    # to attribute to — they came from a bank account, not from another
+    # NovaBanq user, and the sender snapshot field is empty for them.
+    inbound = [
+        d
+        for d in docs
+        if d.transaction_type.value == "TRANSFER"
+        and d.sender_snapshot is not None
+        and d.created_at is not None
+    ]
+
+    if not inbound:
+        # No inbound transfers. Return a shape consistent with the
+        # populated case so the prompt doesn't have to branch.
+        # Currency is derived from the profile because there is no
+        # document to read it from.
+        profile = users_service.get_profile(uid)
+        currency = Currency(profile["currency"])
+        return {
+            "senders": [],
+            "total_count": 0,
+            "distinct_senders": 0,
+            "currency": currency.value,
+            "truncated": truncated,
+        }
+
+    # Group by sender_uid. The same person sending five times lands
+    # in one bucket.
+    buckets: dict[str, dict[str, Any]] = {}
+    for doc in inbound:
+        sender_uid = doc.sender_uid
+        if sender_uid is None:
+            continue
+        snapshot = doc.sender_snapshot or {}
+        bucket = buckets.setdefault(
+            sender_uid,
+            {
+                "sender_uid": sender_uid,
+                "sender_tag": snapshot.get("tag"),
+                "sender_name": snapshot.get("name") or snapshot.get("tag"),
+                "total_minor": 0,
+                "count": 0,
+                "last_received_at": None,
+            },
+        )
+        if doc.to_amount_minor:
+            bucket["total_minor"] += doc.to_amount_minor
+        bucket["count"] += 1
+        # Track the newest transfer per sender. list_for_recipient
+        # returns newest-first, so the first hit per bucket is the
+        # latest — but the comparison keeps this correct even if the
+        # repository's ordering ever changes.
+        ts = doc.created_at
+        if bucket["last_received_at"] is None or ts > bucket["last_received_at"]:
+            bucket["last_received_at"] = ts
+
+    # The recipient's currency is fixed at profile creation, so every
+    # inbound transfer has the same to_currency. Take it from the
+    # first row; fall back to the profile if the schema ever allows
+    # a None here.
+    currency = inbound[0].to_currency
+    if currency is None:
+        profile = users_service.get_profile(uid)
+        currency = Currency(profile["currency"])
+
+    # Sort by total descending, with count as the tiebreaker. The
+    # sender who moved the most money is usually the answer the user
+    # wants first; if two senders tie on total, the one who sent more
+    # often is more interesting than the one who sent once.
+    ranked = sorted(
+        buckets.values(),
+        key=lambda b: (b["total_minor"], b["count"]),
+        reverse=True,
+    )
+
+    senders = []
+    for bucket in ranked:
+        senders.append({
+            "sender_uid": bucket["sender_uid"],
+            "sender_tag": bucket["sender_tag"],
+            "sender_name": bucket["sender_name"],
+            "total_minor": bucket["total_minor"],
+            "count": bucket["count"],
+            "total_display": format_amount(bucket["total_minor"], currency),
+            "last_received_at": (
+                bucket["last_received_at"].isoformat()
+                if bucket["last_received_at"] is not None
+                else None
+            ),
+        })
+
+    return {
+        "senders": senders,
+        "total_count": sum(s["count"] for s in senders),
+        "distinct_senders": len(senders),
+        "currency": currency.value,
+        "truncated": truncated,
     }
 
 
