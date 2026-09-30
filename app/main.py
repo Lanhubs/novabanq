@@ -202,6 +202,14 @@ Try this in the AI chat: type **"send 500 cedis to david.ng"** and watch Nova pa
 
 ---
 
+## 🎬 Watch the 3-minute walkthrough
+
+**[See the full flow end to end — signup, funding, transfer, AI-driven send](https://drive.google.com/drive/folders/1Qv1d_wtG3QHSXKrNp8RaZ7UakylZZdAi?usp=drive_link)**
+
+Watch or test live — whichever you'd rather do first. The video walks through the same core problem this project solves for Africa in about three minutes, if you want the story before (or instead of) driving the app yourself.
+
+---
+
 ## ⚡ In the next 30 seconds, you'll watch
 
 - A sentence — not a form — become a fully-priced, ready-to-execute cross-border transfer
