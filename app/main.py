@@ -166,147 +166,196 @@ app = FastAPI(
     version=settings.app_version,
     debug=settings.debug,
     description="""
-**It's 11:47pm in Accra, and your nephew's school fees are due in Lagos by 8am.**
+# Sending money from one African country to another is slow, costly, and confusing. NovaBanq fixes it.
 
-You have the cedis. He needs naira.
+## The problem, in simple words
 
-You open your banking app. It asks which currency you're sending in. You don't know today's rate, so you open a second app to check. You do the math by hand, because you don't trust either number blind. You retype his bank details from a months-old WhatsApp message. You hit send.
+Let's say Kwame lives in Accra, Ghana. His friend David lives in Lagos, Nigeria. Kwame wants to send David 500 cedis.
 
-Then you wait.
+This should be easy. It is not. Today, this is what Kwame has to do:
 
-Because a transfer *within* Africa takes longer, and costs more, than one to another continent entirely. Lagos to Accra goes through London. Lagos to London goes through London. The intra-African route is longer because the rails don't exist.
+1. Open his bank app and choose which currency to send in.
+2. Open another app, or Google, to check today's cedi to naira rate. He does this because he does not trust the rate the bank shows him.
+3. Do the maths by himself, so he knows how much naira David will really get.
+4. Ask David for his bank account details and type them in by hand. One wrong number and the money goes to the wrong person.
+5. Pay a fee that he only understands after the money has left his account.
+6. Wait. It can take hours. Sometimes it takes days.
 
-By the time the money lands, **8.9% of it is gone** — 8.9% of your nephew's school fee, taken by intermediaries in another hemisphere who held it for a few milliseconds.
+At the end of all this, **David does not get what Kwame thought he was sending.** About 9 out of every 100 cedis are lost along the way.
 
-**That's not one app's bug. That's the entire category.**
+## Where does the money go?
+
+This is the part most people do not know.
+
+**There is no direct road for money between Ghana and Nigeria.**
+
+When Kwame sends cedis, the money does not go straight from Accra to Lagos. It first travels to **London or New York**. There, the cedis are changed to dollars or pounds. Then the dollars or pounds are changed to naira. Then the money travels back to Africa.
+
+Every stop takes a cut. Every change of currency costs money. So Kwame and David, who live in two neighbouring countries, are joined by a money route that goes around the world. They pay for that long trip, even though the money never needed to leave Africa.
+
+## The second problem: a cost you cannot see
+
+There is another way people lose money, and it is harder to notice. Many banks and older money apps do not show their full price as a fee. They hide part of it inside the exchange rate.
+
+Here is a simple example. Say the real market rate is 100 naira for every 1 cedi. The app gives Kwame only 95 naira for each cedi. On 500 cedis:
+
+- At the real rate, David should get ₦50,000.
+- At the app's rate, David gets ₦47,500.
+- The missing ₦2,500 was never shown as a fee. It was taken quietly through the rate.
+
+So an app can say "no transfer fee" and still take a cut. The numbers above are simple ones, only to show the idea. This is why Kwame does not trust the rate his bank shows him, and why he checks a second app.
+
+NovaBanq shows the rate and the 1% fee before you confirm, so you know what David will get before any money moves.
+
+## How bad is it?
+
+The World Bank has been checking the cost of sending money for more than fifteen years. This is what it found:
+
+- Sub-Saharan Africa is **the most expensive region in the world** to send money to. It has held this position almost every year.
+- The average fee in the region is **8.46%**. The world average is **6.36%**.
+- On the **Ghana to Nigeria** route (the same route as our example), the World Bank found **no service at all** that was fast, clear, and fairly priced. It is one of about twenty routes in the world with this problem.
+- On a real transfer, about **8.9%** of the money is lost on the way.
+
+Let's put this in cedis. If Kwame sends 500 cedis, about **GH₵42 is lost** to fees and bad exchange rates. With NovaBanq's 1% fee, he pays about **GH₵5**.
+
+## The problem nobody has closed
+
+Many apps can move money between countries. But almost all of them leave the hard part to the person sending:
+
+- You still choose the currency.
+- You still check the rate.
+- You still do the maths.
+- You still type a long bank account number.
+
+And on the Ghana to Nigeria route, the World Bank found no service that was fast, clear, and fairly priced. That is the gap.
+
+**NovaBanq closes this gap by taking the work away from the user:**
+
+1. **Each person only sees their own money.** The sender sees cedis. The receiver sees naira. Nobody picks a currency.
+2. **The money moves inside NovaBanq.** It does not travel through London or New York, so the long and costly route is gone.
+3. **You send by typing a sentence.** "send 500 cedis to david.ng" is all it takes. Nova finds the receiver, checks the live rate, and shows the result before you confirm.
+
+Cheaper fees are only part of the answer. The real fix is that the user no longer has to think about currency, rates, or maths at all.
+
+## Who pays for this?
+
+Mostly normal families. Most money sent between African countries is not business money. It is:
+
+- A parent paying school fees.
+- A brother sending rent money.
+- A daughter working in another country, sending money home.
+
+Every percent that is lost is money that does not reach a home that needed it. The people who can least afford to lose it are the ones who lose it.
 
 ---
 
-# NovaBanq — send money across Africa in seconds. No currency picker. No multi-app dance. No 8.9%.
+# What NovaBanq does about it
 
-**Try it live in your browser right now — 30 seconds, no install, no phone required.**
+## The idea: nobody has to think about currency
+
+In NovaBanq, **every person has one account, in the money of their own country.** Every person also gets a short tag that shows which country they are in.
+
+- Kwame lives in Ghana. His tag is `@kwame.gh`. His account holds **cedis**.
+- David lives in Nigeria. His tag is `@david.ng`. His account holds **naira**.
+
+Now see what happens when Kwame sends money to David:
+
+1. Kwame types: **"send 500 cedis to david.ng"**
+2. NovaBanq tells him what will happen: *"David will receive about ₦56,749 at today's rate."*
+3. Kwame enters his PIN.
+4. **Kwame pays 500 cedis plus the 1% fee (5 cedis). ₦56,749 enters David's account.**
+
+**Kwame only sees cedis. David only sees naira.**
+
+Kwame does not need to trust or check a naira number from another app. David does not see cedis, and he does not need to work out what they are worth. The money is changed by NovaBanq, inside the transfer, at the live rate. Each person sees the result in their own money.
+
+## The old way and the NovaBanq way
+
+| | The old way | NovaBanq |
+|---|---|---|
+| Choosing a currency | You must choose one | Nobody chooses. Each person sees their own currency |
+| Checking the rate | You open another app to compare | NovaBanq uses the live rate for you |
+| Doing the maths | You do it by hand | NovaBanq shows what the other person will get, before you confirm |
+| Receiver details | You type a long bank number from an old WhatsApp message | You type a short tag, like `david.ng` |
+| The fee | Spread across many places, hard to know the total | One flat fee of **1%**, shown before you confirm |
+| Speed | Hours or days | Seconds |
+| The route | Ghana to London to Nigeria | Ghana to Nigeria, inside NovaBanq |
+
+## Why is our fee so low?
+
+NovaBanq keeps its own record of who has how much money. This record is called a **ledger**. When Kwame sends money to David, the money does not travel around the world. It just moves from one NovaBanq account to another. That costs us almost nothing, so we charge **1% flat**, not the 8.46% that the region pays today.
+
+The money you save stays with your family. It does not go to a middleman in another part of the world.
+
+**We do not hide anything in the exchange rate.** The rate is the market rate from our FX provider, passed on as it is, with no markup added. The 1% fee is a separate line, added on top of what the sender sends. So David always gets the full converted amount, and Kwame can see exactly what he pays.
+
+To put money into NovaBanq (from a bank) or take money out (to a bank), we connect to Flutterwave and Paystack.
+
+## Why do you type a sentence, and not fill a form?
+
+Other money apps give you a form. The form is where the confusion starts: which currency, which rate, which account number.
+
+In NovaBanq, sending money is a chat. Our AI assistant, **Nova**, reads your sentence, finds the receiver, checks the live rate, and tells you what is about to happen. You confirm with your PIN.
+
+**Nova can suggest a transfer, but Nova can never move money.** Only the user's PIN can do that, and the AI never sees the PIN. The real movement of money is done by a separate, strict system.
+
+---
+
+## Can you trust it with real money? (For the technical judges)
+
+Under the chat, NovaBanq has a proper double-entry ledger. This is the same idea that banks use.
+
+- **5-step atomic transactions** for transfers between currencies. All the steps finish together, or none of them do.
+- **Idempotency keys inside the Firestore transaction.** If the same request is sent twice, the money moves only once.
+- **Safe scheduled transfers.** If the server restarts in the middle of a scheduled transfer, it continues safely and cannot pay twice.
+- **bcrypt-hashed PINs with lockout** after too many wrong tries.
+- **Transactional status checks.** If a cancel and a scheduled send happen at the same time, a transfer can never be left half done.
+
+Our rule: **the AI proposes, the ledger decides.** This rule is enforced in the code, not just in a prompt. You can read it in [the repo](https://github.com/Lanhubs/novabanq).
+
+---
+
+## 🚀 Try it in your browser now (30 seconds, no install)
 
 📱 **[Launch the Flutter app in your browser](https://appetize.io/app/b_2xkrdxr27mcqlv5gy2iyj7ix3e?device=pixel7&osVersion=13.0&toolbar=true)** · 🔁 **[Backup link](https://appetize.io/app/b_vo77v2vpnudkp22cu57ld4vkya)** · 📂 **[Source code](https://github.com/Lanhubs/novabanq)**
 
----
-
-## 🔑 Demo account — sign in and start sending
-
-**Ghana account (sender, funded, ready to send):**
+### Demo account (Ghana sender, already funded)
 - Email: `codewithkakes@gmail.com`
 - Password: `test1234`
 - Transaction PIN: `48392`
 
-Sign in and you land on the dashboard — pre-seeded, funded, ready. Ask Nova anything, or send a transfer.
+### Send to either of these Nigerian accounts
+- **`david.ng`**
+- **`olanrewaju.ng`**
 
-**Who you can send to — two live Nigerian recipients:**
-- **`david.ng`** — a real Nigerian account on the platform
-- **`olanrewaju.ng`** — a real Nigerian account on the platform
+**Try this in the AI chat:** type **"send 500 cedis to david.ng"**. Nova will show you how much naira David will receive. Enter the PIN and the transfer is done. You will not see a currency picker at any point.
 
-Try this in the AI chat: **"send 500 cedis to david.ng"** — and watch Nova parse the sentence, price the GHS→NGN corridor live, and read back exactly what's about to happen. Enter the PIN, and a real 5-leg ledger transaction settles in the background.
-
----
-
-## 🎬 Watch the 3-minute walkthrough
-
-**[See the full flow end to end — signup, funding, transfer, AI-driven send](https://drive.google.com/drive/folders/1Qv1d_wtG3QHSXKrNp8RaZ7UakylZZdAi?usp=drive_link)**
+### 🎬 Watch the 3-minute walkthrough
+**[Signup, funding, transfer, and AI-driven send, from start to finish](https://drive.google.com/drive/folders/1Qv1d_wtG3QHSXKrNp8RaZ7UakylZZdAi?usp=drive_link)**
 
 ---
 
-## ⚡ In the next 30 seconds, you'll watch
+## 🔬 Try the AI directly, without the app
 
-- A **sentence** — not a form — become a fully-priced, ready-to-execute cross-border transfer
-- Two currencies bridge **invisibly** inside one transfer — no currency picker anywhere in the flow
-- A real **double-entry ledger** settle a 5-leg atomic transaction against a live FX rate
-- An AI that's allowed to *propose* a transfer — and is **never, ever allowed to move money** on its own
+**`POST /api/v1/ai/ask`** answers plain questions using the user's own transaction history. Try: *"what's my balance"*, *"who did I send to last"*, *"who has sent me money"*, *"did my scheduled transfer go out"*. If you type a transfer command, it gives back a confirmation that is ready to execute.
 
-That last point is the whole engineering story of this project.
-
----
-
-## 🌍 The problem we built NovaBanq for
-
-**Sub-Saharan Africa isn't a one-off outlier.** The World Bank has tracked remittance prices for over fifteen years, and the region has held the title of the **world's most expensive** for almost every one of them.
-
-- **8.46% average fees** across the region, against a **6.36% global average**
-- The World Bank tracks roughly **twenty corridors worldwide** where *no service at all* meets its own bar for a fast, transparent, reasonably priced transfer — and **Ghana → Nigeria is one of them**
-
-**Every app that tries to fix this hands the user the mess anyway:**
-
-1. Open the app
-2. Pick a currency you're sending in
-3. Pick a currency they'll receive
-4. Compare exchange rates against a market you don't know
-5. Do the FX math manually
-6. Retype the recipient's bank details
-7. Confirm — and hope the fee you saw is the fee you pay
-
-**The complexity is the tax. The form *is* the product.** That's the 8.46%.
-
----
-
-## 💡 What NovaBanq does that no other fintech application in the world does
-
-### 1. One account. One currency. Invisible FX inside the transfer.
-
-Every other cross-border app asks the user to hold multiple currencies, or pick a currency on a send screen, or see a rate and confirm a conversion. **We don't.**
-
-Every NovaBanq user has a **single account in their own country's currency**, plus a **@tag** with a country suffix — like `@david.ng`.
-
-When a Ghanaian sends cedis to a Nigerian's `.ng` tag, the FX conversion happens **invisibly inside the transfer**. The sender sees cedis leave. The recipient sees naira arrive. **Neither opens a currency picker. Neither compares rates. Neither does the math.** Nobody in the world has shipped this combination as a product.
-
-### 2. The send form doesn't exist — AI is the interface.
-
-Every other app in this category is a form. **NovaBanq's is a conversation.**
-
-> *"send 500 cedis to david.ng"*
-
-Nova parses the sentence, prices it live against the real GHS→NGN corridor, and reads back exactly what's about to happen: the recipient's name, the amount, the fee, and what David will actually receive in his own currency.
-
-**One sentence. One PIN. The money is on its way.**
-
-**The PIN never touches the language model.** The AI proposes; the user authorizes. Every decision the old flow asked the user to make — currency, rate, recipient, fee — the AI already made. What's left is a single tap.
-
-This is not a chatbot bolted onto a payments app. It's an AI that knows your ledger, prices the transfer, and hands it to a real double-entry system to settle. **No fintech anywhere — Africa, Europe, the US — ships this combination today.**
-
-### 3. A double-entry ledger underneath, built the way a bank's has to be.
-
-The AI is the interface. Underneath it is a real ledger, engineered for the failure modes a demo can ignore:
-
-- **5-leg atomic transactions** for cross-currency transfers — every leg commits together, or none of them do
-- **Idempotency keys enforced inside the Firestore transaction itself** — a retried request moves money exactly once, no matter how many times it's retried
-- **Deterministic replay** for scheduled transfers — a server restart mid-execution re-runs safely instead of double-sending or losing the transfer
-- **bcrypt-hashed PINs with lockout** on repeated failed attempts
-- **Transactional status preconditions** — a scheduler race or a badly-timed cancel can never leave a transfer half-settled
-
-The AI is fast and friendly; the ledger is slow, careful, and correct. **The AI never has the authority to move money — it only proposes what should move.** That sentence is enforced in code, not in a prompt. Read the ledger and transfers modules in [the repo](https://github.com/Lanhubs/novabanq) and you'll see it.
-
----
-
-## 🛠️ Who built NovaBanq
-
-**Daniel Clement Toluwalase — Founder and UI/UX Designer**
-Daniel designed the entire NovaBanq experience: the flow, the interface, the visual identity. Every screen in the live demo — from the dashboard to the transfer confirmation — was designed by him.
-
-**Kakes David — Software Engineer, Backend Engineer, and CTO**
-Kakes built and maintains the entire backend: the double-entry ledger, the transfers engine, the FX corridor cache, the AI intent parser, the assistant Nova, the scheduled-transfer worker, and every API endpoint on this page. He architected the system around a single rule — **the AI proposes, the ledger decides** — and built the ledger so that rule is enforced in code. [**See it in the repo.**](https://github.com/Lanhubs/novabanq)
-
-**Habeeb Mohammed Olanrewaju — Frontend Developer**
-Habeeb built the Flutter app streaming to your browser via the Appetize link above. Every screen you tap, every animation you see, was written by him.
-
----
-
-## 🔬 Try the AI directly, without the app shell
-
-**`POST /api/v1/ai/ask`** — takes a plain-language question and answers it grounded in the user's own ledger. Try: *"what's my balance"*, *"who did I send to last"*, *"did my scheduled transfer go out"*. Or type a transfer command and get back a structured confirmation ready to execute.
-
-**`POST /api/v1/ai/execute-transfer`** — takes the confirmed intent plus a PIN and settles it against the ledger. Idempotent. Verified recipient. Verified PIN. Either it settles, or it returns a specific, user-facing error.
+**`POST /api/v1/ai/execute-transfer`** takes the confirmed transfer and the PIN, and completes it. It is idempotent. The receiver is checked and the PIN is checked. Either the transfer goes through, or the user gets a clear error message.
 
 Every endpoint is documented below.
 
 ---
 
-**Sign in with the demo account above and send your first cross-border transfer in under 30 seconds. Or open the [repository](https://github.com/Lanhubs/novabanq) and read the ledger code that makes it safe to do so.**
+## 🛠️ Who built NovaBanq
+
+**Daniel Clement Toluwalase, Founder and UI/UX Designer.** Designed the whole NovaBanq experience: the flow, the screens, and the look.
+
+**Kakes David, Software Engineer, Backend Engineer, and CTO.** Built and runs the whole backend: the ledger, the transfers engine, the FX rate cache, the AI intent parser, Nova, the scheduled-transfer worker, and every API endpoint on this page. [See it in the repo.](https://github.com/Lanhubs/novabanq)
+
+**Habeeb Mohammed Olanrewaju, Frontend Developer.** Built the Flutter app that you can open in your browser through the Appetize link above.
+
+---
+
+**A Ghanaian sends cedis. A Nigerian receives naira. Nobody picks a currency, checks a rate, or does any maths. That is NovaBanq.**
 
 **Built by Daniel, Kakes, and Habeeb. For Africa.**
 """,
