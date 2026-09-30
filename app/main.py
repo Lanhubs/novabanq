@@ -289,7 +289,7 @@ The money you save stays with your family. It does not go to a middleman in anot
 
 **We do not hide anything in the exchange rate.** The rate is the market rate from our FX provider, passed on as it is, with no markup added. The 1% fee is a separate line, added on top of what the sender sends. So David always gets the full converted amount, and Kwame can see exactly what he pays.
 
-To put money into NovaBanq (from a bank) or take money out (to a bank), we connect to Flutterwave and Paystack.
+**Money enters through a virtual account issued by our payment provider** — Flutterwave in production, a deterministic mock in the demo. **Withdrawals are the next feature on the roadmap**; the ledger is already built to support them, and Paystack is one of the providers we'd consider for corridors Flutterwave doesn't cover.
 
 ## Why do you type a sentence, and not fill a form?
 
