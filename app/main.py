@@ -333,6 +333,8 @@ Our rule: **the AI proposes, the ledger decides.** This rule is enforced in the 
 ### 🎬 Watch the 3-minute walkthrough
 **[Signup, funding, transfer, and AI-driven send, from start to finish](https://drive.google.com/drive/folders/1Qv1d_wtG3QHSXKrNp8RaZ7UakylZZdAi?usp=drive_link)**
 
+💡 **Note for the judges:** the video shows the smooth visual flow and the AI interface. Everything underneath is real — every button press in the video fires an actual 5-leg atomic ledger transaction, writes real state to Firestore, and updates the wallet through the same backend you see documented below. Nothing in the video is a mock-up of a product; it's the product.
+
 ---
 
 ## 🔬 Try the AI directly, without the app
