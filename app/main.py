@@ -166,7 +166,7 @@ app = FastAPI(
     version=settings.app_version,
     debug=settings.debug,
     description="""
-# NovaBanq — send money across Africa in seconds. No markup. No multi-app dance.
+# NovaBanq — send money across Africa in seconds. No markup. No multi-app dance. No currency picker.
 
 **Try it live in your browser right now — 30 seconds, no install, no phone required.**
 
@@ -178,7 +178,9 @@ app = FastAPI(
 
 🔁 **[Backup demo link — use this if the primary is exhausted](https://appetize.io/app/b_vo77v2vpnudkp22cu57ld4vkya)**
 
-Both links stream the real Flutter app to your browser. No download. No Play Store. No install. In under 30 seconds you'll be signed in and sending a cross-border transfer.
+📂 **[Source code — browse the full repo on GitHub](https://github.com/Lanhubs/novabanq)**
+
+The demo links stream the real Flutter app to your browser — no download, no Play Store, no install. In under 30 seconds you'll be signed in and sending a cross-border transfer. The repository above is the actual code behind everything you're about to see — every claim below is something you can go read for yourself.
 
 ---
 
@@ -187,6 +189,7 @@ Both links stream the real Flutter app to your browser. No download. No Play Sto
 **Ghana account (sender, funded, ready to send):**
 - Email: `codewithkakes@gmail.com`
 - Password: `test1234`
+- Transaction PIN: `48392` (needed to confirm any transfer)
 
 Once signed in, you land directly on the dashboard — the account is pre-seeded with a funded balance, so you can go straight to the send flow or ask Nova a question.
 
@@ -195,26 +198,29 @@ Once signed in, you land directly on the dashboard — the account is pre-seeded
 - **`david.ng`** — a real Nigerian account on the platform
 - **`olanrewaju.ng`** — a real Nigerian account on the platform
 
-Try this in the AI chat: type **"send 500 cedis to david.ng"** and watch Nova parse the sentence, price the GHS→NGN corridor live, and read back exactly what's about to happen — before any money moves. Enter the PIN, and a real 5-leg ledger transaction settles in the background.
+Try this in the AI chat: type **"send 500 cedis to david.ng"** and watch Nova parse the sentence, price the GHS→NGN corridor live, and read back exactly what's about to happen — before any money moves. Enter the PIN (`48392`), and a real 5-leg ledger transaction settles in the background.
 
 ---
 
-## 🎬 Watch the 3-minute walkthrough
+## ⚡ In the next 30 seconds, you'll watch
 
-**[See the full flow end to end — signup, funding, transfer, AI-driven send](https://drive.google.com/drive/folders/1Qv1d_wtG3QHSXKrNp8RaZ7UakylZZdAi?usp=drive_link)**
+- A sentence — not a form — become a fully-priced, ready-to-execute cross-border transfer
+- Two different currencies bridge invisibly inside one transfer, with no currency picker anywhere in the flow
+- A real double-entry ledger settle a 5-leg atomic transaction against a live FX rate
+- An AI that's allowed to *propose* a transfer, and is never, ever allowed to *move money* on its own
 
-If you'd rather watch before trying, this is the fastest way to understand what NovaBanq does and why it matters.
+That last point is the whole engineering story of this project. Everything below explains why it's harder than it sounds, and why almost nobody has shipped it.
 
 ---
 
 ## 🌍 The problem we built NovaBanq for
 
-**Sub-Saharan Africa is the most expensive region on Earth to send money to.**
+**Sub-Saharan Africa isn't a one-off outlier — it's held the title of the world's most expensive region for remittances for more than fifteen years running,** according to the World Bank's own Remittance Prices Worldwide data.
 
 - **8.46% average fees** across the region, against a **6.36% global average**
-- The **Ghana → Nigeria corridor** is one of only **twenty routes worldwide** where the World Bank found **no service at all** meeting its own standard for a fast, transparent, reasonably priced transfer
+- The World Bank tracks roughly twenty corridors worldwide where *no service at all* meets its own bar for a fast, transparent, reasonably priced transfer — the **Ghana → Nigeria corridor is one of them**
 
-**Why the costs are so high:** intra-African payment corridors route through Europe or the US. Lagos to Accra goes Lagos → London → Accra. Lagos to London goes Lagos → London. The intra-African route is longer and more expensive because the rails don't exist yet. Every percentage point those rails cost is a meal, a school fee, a doctor's visit, a phone credit — taken by intermediaries in another hemisphere.
+**Why the costs are so high:** intra-African payment corridors route through Europe or the US. Lagos to Accra goes Lagos → London → Accra. Lagos to London goes Lagos → London. The intra-African route is longer and more expensive because the rails don't exist yet. Every percentage point those rails cost is a meal, a school fee, a doctor's visit, a phone credit — taken by intermediaries in another hemisphere who never touch the money for more than a few milliseconds.
 
 **And what does every app that tries to fix this do?** It hands the user the mess anyway:
 
@@ -226,7 +232,7 @@ If you'd rather watch before trying, this is the fastest way to understand what 
 6. Fill in a recipient's bank details
 7. Confirm — and hope the fee you saw is the fee you pay
 
-The complexity is the tax. The form is the product. That's the 8.46%.
+The complexity is the tax. The form *is* the product. That's the 8.46%.
 
 ---
 
@@ -252,7 +258,15 @@ And Nova — our AI layer — parses the sentence, prices it live against the re
 
 ### 3. A double-entry ledger underneath, built for correctness.
 
-The AI is the interface. Underneath it is a real ledger: **5-leg atomic transactions** for cross-currency transfers, **idempotency keys inside the Firestore transaction**, **deterministic replay** for scheduled transfers, **bcrypt-hashed PINs with lockout**, and **transactional status preconditions** so a scheduler race or a user cancel can never leave a transfer in an inconsistent state. The AI is fast and friendly; the ledger is slow, careful, and correct. **The AI never has the authority to move money — it only proposes what should move.**
+The AI is the interface. Underneath it is a real ledger, engineered the way a bank's ledger has to be, not the way a demo's ledger can get away with being:
+
+- **5-leg atomic transactions** for cross-currency transfers — every leg commits together or none of them do, so a crash mid-transfer can never leave money half-moved
+- **Idempotency keys enforced inside the Firestore transaction itself** — the same request retried a hundred times over a bad connection still only moves money once
+- **Deterministic replay** for scheduled transfers, so a server restart mid-execution re-runs safely instead of double-sending or losing the transfer
+- **bcrypt-hashed PINs with lockout** on repeated failed attempts
+- **Transactional status preconditions**, so a scheduler race or a badly-timed cancel can never leave a transfer in a state that isn't fully settled or fully reverted
+
+The AI is fast and friendly; the ledger is slow, careful, and correct. **The AI never has the authority to move money — it only proposes what should move.** That sentence is enforced in code, not just in a system prompt — read the ledger and transfers modules in [the repo](https://github.com/Lanhubs/novabanq) and you'll see it for yourself.
 
 ---
 
@@ -262,7 +276,7 @@ The AI is the interface. Underneath it is a real ledger: **5-leg atomic transact
 Daniel designed the entire NovaBanq experience: the flow, the interface, and the visual identity of the product. Every screen in the live demo — from the dashboard to the transfer confirmation — was designed by him. He's one of the original founders and the reason NovaBanq feels like a product instead of a prototype.
 
 **Kakes David — Software Engineer, Backend Engineer, and CTO**
-Kakes built and maintains the entire backend: the double-entry ledger, the transfers engine, the FX corridor cache, the AI intent parser, the AI assistant Nova, the scheduled-transfer worker, and every API endpoint you're looking at on this page. He architected the system around a simple rule — **the AI proposes, the ledger decides** — and built the ledger so that rule is enforced in code, not just in the prompt.
+Kakes built and maintains the entire backend: the double-entry ledger, the transfers engine, the FX corridor cache, the AI intent parser, the AI assistant Nova, the scheduled-transfer worker, and every API endpoint you're looking at on this page. He architected the system around a simple rule — **the AI proposes, the ledger decides** — and built the ledger so that rule is enforced in code, not just in the prompt. [**See it yourself in the repo.**](https://github.com/Lanhubs/novabanq)
 
 **Habeeb Mohammed Olanrewaju — Frontend Developer**
 Habeeb built the Flutter app that streams to your browser via the Appetize link above. Every screen you tap, every form you fill, every animation you see was written by him. He's the reason the app doesn't just work — it feels fast, smooth, and finished.
@@ -281,7 +295,7 @@ Every endpoint is documented below with example requests, example responses, and
 
 ---
 
-**Sign in with the demo account above and send your first cross-border transfer in under 30 seconds.**
+**Sign in with the demo account above and send your first cross-border transfer in under 30 seconds. Or open the [repository](https://github.com/Lanhubs/novabanq) and read the ledger code that makes it safe to do so.**
 
 **Built by Daniel, Kakes, and Habeeb. For Africa.**
 """,
